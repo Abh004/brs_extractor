@@ -1,10 +1,7 @@
 """
 Bullet deduplication: embedding prefilter + LLM cluster-and-canonicalize.
 
-Used in two places:
-  1. Per-chunk: merge J1/J2/J3 bullet lists by dropping near-duplicate bullets
-     before writing to the chunk's refined_requirements field.
-  2. Cross-block: after all chunks are refined, drop bullets that are
+Cross-block: after all chunks are refined, drop bullets that are
      semantically equivalent across different time blocks.
 
 Dedup pipeline per location:
@@ -26,9 +23,8 @@ from utils import extract_balanced_json, normalize_embeddings
 
 _model = None  # lazy-loaded on first use
 
-# ---------------------------------------------------------------------------
+
 # Known meta-instruction patterns that judges echo from their system prompts.
-# ---------------------------------------------------------------------------
 _META_PATTERNS = re.compile(
     r"(no duplicate|prevent duplicate|maximum \d+ bullet|plain text only|"
     r"no preamble|clear and concise|eliminate vague|remove duplicate|"
@@ -179,11 +175,7 @@ def _cosine_similarity_against_pool(
     return float(sims.max()) if sims.size else 0.0
 
 
-# ---------------------------------------------------------------------------
 # Candidate clustering (embedding prefilter — recall, not precision)
-# ---------------------------------------------------------------------------
-
-
 def _connected_components(n: int, edges: list[tuple[int, int]]) -> list[list[int]]:
     """Union-find over `n` nodes with the given edge list. Returns components
     as lists of indices, each sorted ascending, components sorted by their
@@ -248,11 +240,7 @@ def cluster_candidates(
     return _connected_components(n, edges), embeddings
 
 
-# ---------------------------------------------------------------------------
 # LLM cluster resolution (precision step)
-# ---------------------------------------------------------------------------
-
-
 def _split_auto_accept(
     cluster: list[int], embeddings: np.ndarray, threshold: float
 ) -> tuple[list[list[int]], list[int]]:
@@ -319,10 +307,6 @@ def llm_resolve_clusters(
     several real ones) and return one canonical bullet per confirmed group.
     Singleton clusters pass through untouched with no LLM call.
 
-    On any parse/call failure for a given cluster, fails safe by keeping all
-    of that cluster's bullets unmodified rather than risking an incorrect
-    merge.
-
     Args:
         bullets:               Full bullet list (post cheap-filter stage)
         clusters:              Candidate clusters from cluster_candidates()
@@ -365,10 +349,6 @@ def llm_resolve_clusters(
             f"list positions):\n{numbered}"
         )
 
-        # Scale the token budget with cluster size — a fixed budget that's
-        # fine for a 3-bullet cluster will truncate a 17-bullet one before
-        # the JSON closes, which presents as "no clusters in LLM response"
-        # with no indication that truncation was the actual cause.
         effective_max_tokens = max(max_tokens, 30 * len(cluster))
 
         raw = None
@@ -384,8 +364,7 @@ def llm_resolve_clusters(
             if not sub_clusters:
                 raise ValueError("no clusters in LLM response")
 
-            # sub_clusters are indices into `cluster` (the local numbering we
-            # gave the LLM) — map back to indices into the original `bullets`.
+            # sub_clusters are indices into `cluster` (the local numbering we gave the LLM) — map back to indices into the original `bullets`.
             seen_local: set[int] = set()
             for sub in sub_clusters:
                 sub = [int(x) for x in sub if isinstance(x, (int, float, str))]
@@ -429,9 +408,7 @@ def dedup_bullets_llm(
     auto-accept skip for the obvious high-cosine majority (>=
     auto_accept_threshold, merged with no LLM call), then LLM judgment +
     canonicalization for whatever's left in the ambiguous
-    candidate_threshold–auto_accept_threshold band. This replaces the old
-    pure-cosine dedup_bullets() as the final pass — see module docstring
-    for why.
+    candidate_threshold–auto_accept_threshold band.
     """
     if len(bullets) <= 1:
         return bullets
@@ -456,12 +433,6 @@ def dedup_cross_block(
     Remove semantically duplicate bullets that appear across different time
     blocks. Returns NEW dicts — does NOT mutate the input list. The first
     block with content is always kept in full (pool is empty).
-
-    Unlike the old pure-cosine version, the embedding pool is only used to
-    find CANDIDATE cross-block duplicates (high recall, low precision); the
-    LLM makes the actual keep/merge decision against the running pool of
-    already-accepted bullets, the same way it does within a single chunk in
-    merge_judge_outputs.
 
     Args:
         refined:              List of refined chunk dicts (not mutated)
@@ -492,8 +463,7 @@ def dedup_cross_block(
             result.append(dict(req))
             continue
 
-        # Bullets arriving here have already been through filter_substrings
-        # inside merge_judge_outputs, so we skip repeating that step.
+        # Bullets arriving here have already been through filter_substrings inside merge_judge_outputs, so we skip repeating that step.
         chunk_embeddings = model.encode(
             bullets, convert_to_numpy=True, show_progress_bar=False
         )
@@ -533,12 +503,7 @@ def dedup_cross_block(
                     llm_handle,
                     embeddings=local_embeddings,
                 )
-                # If the new bullet's text survived verbatim or as part of a
-                # merge that still represents it, it's a duplicate -> drop.
-                # We detect "dropped" by checking whether resolving merged it
-                # away: if len(resolved) < len(local_bullets) and the new
-                # bullet is not present as its own canonical text, treat as
-                # duplicate of an existing pool entry (already represented).
+                # If the new bullet's text survived verbatim or as part of a merge that still represents it, it's a duplicate -> drop.
                 is_new_bullet_represented_alone = bullet in resolved
                 merged_away = len(resolved) < len(local_bullets)
 

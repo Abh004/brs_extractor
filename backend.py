@@ -21,9 +21,8 @@ from typing import Any
 
 from utils import clean_output, strip_think_blocks
 
+
 # ── abstract base ─────────────────────────────────────────────────────────────
-
-
 class InferenceBackend(ABC):
     """
     Common interface for all inference backends.
@@ -31,8 +30,6 @@ class InferenceBackend(ABC):
     Implementations must be safe to call from the main thread only — MLX GPU
     streams are thread-local and cannot be used from ThreadPoolExecutor workers.
     """
-
-    # ---------- VLM (multimodal) ----------
 
     @abstractmethod
     def load_vlm(self, model_id: str) -> None:
@@ -52,8 +49,6 @@ class InferenceBackend(ABC):
     @abstractmethod
     def unload_vlm(self) -> None:
         """Free VLM weights. Safe to call even if nothing is loaded."""
-
-    # ---------- LLM (text-only) ----------
 
     @abstractmethod
     def load_llm(self, model_id: str) -> Any:
@@ -77,13 +72,8 @@ class InferenceBackend(ABC):
     def unload_llm(self, handle: Any) -> None:
         """Free an LLM handle returned by load_llm."""
 
-    # ---------- utility ----------
-
     def clear_cache(self) -> None:
         """Optional: flush any accelerator memory caches (MLX Metal cache etc.)."""
-
-
-# ── MLX backend ───────────────────────────────────────────────────────────────
 
 
 class MLXBackend(InferenceBackend):
@@ -94,9 +84,8 @@ class MLXBackend(InferenceBackend):
     be called from the main thread — do not wrap calls in ThreadPoolExecutor.
     """
 
-    # Model IDs that support the /no_think control token (Qwen3 family).
     _NO_THINK_MODELS = {
-        "mlx-community/Qwen3-VL-8B-Instruct-8bit",
+        "mlx-community/Qwen3-VL-8B-Instruct-MLX-4bit",
         "mlx-community/Qwen3-1.7B-4bit",
     }
 
@@ -105,8 +94,6 @@ class MLXBackend(InferenceBackend):
         self._vlm_processor = None
         self._vlm_config = None
         self._vlm_model_id: str | None = None
-
-    # ---- VLM ----
 
     def load_vlm(self, model_id: str) -> None:
         import warnings
@@ -185,8 +172,6 @@ class MLXBackend(InferenceBackend):
         mx.clear_cache()
         print("  [MLX] VLM unloaded.")
 
-    # ---- LLM ----
-
     def load_llm(self, model_id: str) -> dict:
         if model_id in self._VLM_BACKED_TEXT_MODELS:
             from mlx_vlm import load
@@ -256,7 +241,7 @@ class MLXBackend(InferenceBackend):
             raw = str(result.text) if hasattr(result, "text") else str(result)
             if "<think>" in raw and "</think>" not in raw:
                 return ""
-            return clean_output(strip_think_blocks(raw))
+            return clean_output(raw)
 
         # existing mlx_lm path, unchanged
         from mlx_lm import generate
@@ -311,9 +296,6 @@ class MLXBackend(InferenceBackend):
     _VLM_BACKED_TEXT_MODELS = {
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
     }
-
-
-# ── HuggingFace backend ───────────────────────────────────────────────────────
 
 
 def _attn_kwargs() -> dict:
@@ -402,8 +384,6 @@ class HFBackend(InferenceBackend):
             }
         except ImportError:
             return {}
-
-    # ---- VLM ----
 
     def load_vlm(self, model_id: str) -> None:
         try:
@@ -495,8 +475,6 @@ class HFBackend(InferenceBackend):
         self._try_cuda_empty_cache()
         print("  [HF] VLM unloaded.")
 
-    # ---- LLM ----
-
     def load_llm(self, model_id: str) -> dict:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -579,10 +557,7 @@ class HFBackend(InferenceBackend):
         self._try_cuda_empty_cache()
 
 
-# ── model ID mapping ──────────────────────────────────────────────────────────
-
 # Maps mlx-community quantised model IDs → canonical HuggingFace repo IDs.
-# Add entries here as you use new models.
 _MLX_TO_HF: dict[str, str] = {
     "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Qwen/Qwen3-VL-8B-Instruct",
     "lmstudio-community/Qwen3.5-9B-MLX-4bit": "Qwen/Qwen3.5-9B",
@@ -596,8 +571,6 @@ def _mlx_to_hf(model_id: str) -> str:
     """
     return _MLX_TO_HF.get(model_id, model_id)
 
-
-# ── factory ───────────────────────────────────────────────────────────────────
 
 _BACKEND_MAP = {
     "mlx": MLXBackend,

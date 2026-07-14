@@ -79,7 +79,6 @@ def _parse_config_response(text: str) -> dict | None:
     utils.extract_balanced_json). Returns None if no valid, complete JSON
     object was found (including the truncated-output case).
     """
-    text = strip_think_blocks(text)
     text = clean_output(text)  # strips special tokens + real-self artefacts
     return extract_balanced_json(text)
 
