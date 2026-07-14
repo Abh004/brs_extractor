@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Generated pipeline artifacts — do not commit
+keyframes/
+output/
+input/
+old_ops/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Model weights (downloaded at runtime via HuggingFace Hub)
+# They live in ~/.cache/huggingface/ — never in the repo
+*.safetensors
+*.bin
+*.gguf
+*.ttf
+
+# Secrets / credentials
+.env
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
