@@ -226,6 +226,72 @@ def _write_json(
     return all_bullets
 
 
+def _flatten_flagged_bullets(refined: list) -> tuple[list[list[str]], list[str]]:
+    """Extract + flag bullets ONCE. Returns (per-block bullets, flat bullet list)."""
+    per_block: list[list[str]] = []
+    all_bullets: list[str] = []
+    for req in refined:
+        bullets = (
+            extract_bullets(req["refined_requirements"])
+            if req.get("refined_requirements")
+            else []
+        )
+        bullets = [flag_unknown_words(b) for b in bullets]
+        per_block.append(bullets)
+        all_bullets.extend(bullets)
+    return per_block, all_bullets
+
+
+def _assemble_blocks(
+    refined: list, per_block: list[list[str]], priorities: list[str] | None = None
+) -> list[dict]:
+    """Pure structuring — no extraction, no I/O."""
+    blocks = []
+    cursor = 0
+    for req, bullets in zip(refined, per_block):
+        if priorities is not None:
+            slice_ = priorities[cursor : cursor + len(bullets)]
+            cursor += len(bullets)
+            bullet_payload = [{"text": b, "priority": p} for b, p in zip(bullets, slice_)]
+        else:
+            bullet_payload = bullets
+        blocks.append(
+            {
+                "minute_block": req["minute_block"],
+                "time_range": req["time_range"],
+                "bullets": bullet_payload,
+                "error": req.get("error"),
+            }
+        )
+    return blocks
+
+
+def _dump_json(
+    blocks: list[dict],
+    refined: list,
+    inference_elapsed: float,
+    judges_elapsed: float,
+    dedup_removed: int,
+) -> None:
+    """The only place that touches disk."""
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    total = inference_elapsed + judges_elapsed
+    successful = sum(1 for r in refined if r.get("refined_requirements"))
+    output = {
+        "summary": {
+            "total_chunks": len(refined),
+            "successfully_refined": successful,
+            "duplicate_bullets_removed_cross_block": dedup_removed,
+            "inference_time_sec": round(inference_elapsed, 1),
+            "judges_time_sec": round(judges_elapsed, 1),
+            "total_time_sec": round(total, 1),
+        },
+        "requirements": blocks,
+    }
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+
 def _generate_docx() -> None:
     """
     Call generate_docx.js via node to produce the BRS Word document.
@@ -476,39 +542,21 @@ def main():
                 )
                 dedup_removed = 0
 
-            # First pass: get the flat bullet list (no priorities yet) to classify against
-            all_bullets = _write_json(
-                refined, inference_elapsed, judges_elapsed, dedup_removed
-            )
+            per_block, all_bullets = _flatten_flagged_bullets(refined)  # ONE spellcheck pass, ever
 
             print("  Classifying requirement priorities...")
             priority_start = time.time()
             try:
-                priorities = classify_priorities(
-                    all_bullets, backend=backend, handle=judge3_handle
-                )
+                priorities = classify_priorities(all_bullets, backend=backend, handle=judge3_handle)
                 priority_elapsed = time.time() - priority_start
-                print(
-                    f"  Classified {len(priorities)} requirements "
-                    f"(M={priorities.count('M')}, S={priorities.count('S')}, "
-                    f"C={priorities.count('C')}) ({priority_elapsed:.1f}s)\n"
-                )
+                print(f"  Classified {len(priorities)} requirements ... ({priority_elapsed:.1f}s)\n")
             except Exception as e:
                 priority_elapsed = time.time() - priority_start
-                print(
-                    f"  WARNING: priority classification failed after "
-                    f"{priority_elapsed:.1f}s: {e}. Defaulting all to 'S'.\n"
-                )
+                print(f"  WARNING: priority classification failed after {priority_elapsed:.1f}s: {e}. Defaulting all to 'S'.\n")
                 priorities = ["S"] * len(all_bullets)
 
-            # Second pass: rewrite JSON with priorities attached per bullet
-            all_bullets = _write_json(
-                refined,
-                inference_elapsed,
-                judges_elapsed,
-                dedup_removed,
-                priorities=priorities,
-            )
+            blocks = _assemble_blocks(refined, per_block, priorities=priorities)
+            _dump_json(blocks, refined, inference_elapsed, judges_elapsed, dedup_removed)
             print(f"  JSON written to {OUTPUT_FILE}")
 
             # ===== STAGE 6: BRS CONFIG GENERATION =====

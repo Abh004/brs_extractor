@@ -3,31 +3,14 @@ backend.py
 
 Inference backend abstraction for the pipeline.
 
-Provides a common interface so pipeline stages (VLM proposer, judges,
-config generator) never import mlx_vlm or mlx_lm directly — they call
-through a backend instance instead.
-
 Select via environment variable:
   BACKEND=mlx   (default) — Apple Silicon, MLX. Fast, native.
   BACKEND=hf    — Any CUDA/CPU box. Uses HuggingFace transformers + PIL.
 
 Usage:
   from backend import get_backend
-  backend = get_backend()               # reads BACKEND env var
-  backend = get_backend("hf")           # explicit override
-
-VLM:
-  text = backend.generate_vlm(frame_paths, transcript, system_prompt)
-
-LLM:
-  text = backend.generate_llm(handle, system_prompt, user_prompt, max_tokens)
-
-Lifecycle:
-  backend.load_vlm(model_id)
-  backend.unload_vlm()
-  # judges load individually:
-  handle = backend.load_llm(model_id)
-  backend.unload_llm(handle)
+  backend = get_backend()
+  backend = get_backend("hf")
 """
 
 from __future__ import annotations
@@ -36,7 +19,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any
 
-from utils import clean_output, strip_think_blocks  # noqa: F401 — clean_output re-exported for callers
+from utils import clean_output, strip_think_blocks
 
 # ── abstract base ─────────────────────────────────────────────────────────────
 
@@ -107,16 +90,13 @@ class MLXBackend(InferenceBackend):
     """
     Apple Silicon backend using mlx-vlm (VLM) and mlx_lm (LLM).
 
-    All operations run on the Metal GPU via MLX. Not importable on Linux
-    because mlx / mlx_vlm are macOS-only packages.
-
     Thread safety: MLX GPU streams are thread-local. This backend must only
     be called from the main thread — do not wrap calls in ThreadPoolExecutor.
     """
 
     # Model IDs that support the /no_think control token (Qwen3 family).
     _NO_THINK_MODELS = {
-        "mlx-community/Qwen3-VL-4B-Instruct-8bit",
+        "mlx-community/Qwen3-VL-8B-Instruct-8bit",
         "mlx-community/Qwen3-1.7B-4bit",
     }
 
@@ -327,9 +307,7 @@ class MLXBackend(InferenceBackend):
 
         mx.clear_cache()
 
-    # Model IDs that are natively unified VLM architectures (Qwen3.5, etc.) but
-    # used here purely for text — routed through mlx_vlm with num_images=0
-    # rather than mlx_lm, since these models don't load via mlx_lm's API.
+    # Model IDs that are natively unified VLM architectures (Qwen3.5, etc.)
     _VLM_BACKED_TEXT_MODELS = {
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
     }
@@ -384,16 +362,6 @@ def _from_pretrained_safe(cls, model_id: str, **kwargs):
 class HFBackend(InferenceBackend):
     """
     Cross-platform backend using HuggingFace transformers.
-
-    Supports CUDA (Linux/Windows GPU), MPS (Mac, alternative to MLX),
-    and CPU. Automatically selects the best available device.
-
-    VLM: uses AutoModelForVision2Seq + AutoProcessor (works with Qwen2-VL,
-    LLaVA, InternVL, etc.). Images loaded via PIL.
-
-    LLM: uses AutoModelForCausalLM + AutoTokenizer with 4-bit BitsAndBytes
-    quantisation when on CUDA (matches MLX 4bit models). Falls back to
-    float16/bfloat16 on MPS/CPU.
 
     Install extras:
       pip install transformers accelerate pillow bitsandbytes
@@ -617,8 +585,7 @@ class HFBackend(InferenceBackend):
 # Add entries here as you use new models.
 _MLX_TO_HF: dict[str, str] = {
     "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Qwen/Qwen3-VL-8B-Instruct",
-    "mlx-community/Phi-3-mini-4k-instruct-4bit": "microsoft/Phi-3-mini-4k-instruct",
-    "mlx-community/Llama-3.2-1B-Instruct-4bit": "unsloth/Llama-3.2-1B-Instruct",
+    "lmstudio-community/Qwen3.5-9B-MLX-4bit": "Qwen/Qwen3.5-9B",
     "mlx-community/Qwen3-1.7B-4bit": "Qwen/Qwen3-1.7B",
 }
 
@@ -626,7 +593,6 @@ _MLX_TO_HF: dict[str, str] = {
 def _mlx_to_hf(model_id: str) -> str:
     """
     Convert an mlx-community model ID to its canonical HuggingFace equivalent.
-    Falls back to the original ID unchanged (useful if already a HF ID).
     """
     return _MLX_TO_HF.get(model_id, model_id)
 
@@ -641,14 +607,7 @@ _BACKEND_MAP = {
 
 def get_backend(name: str | None = None) -> InferenceBackend:
     """
-    Return an InferenceBackend instance.
-
-    Args:
-        name: "mlx" or "hf". If None, reads the BACKEND env var
-              (defaults to "mlx").
-
-    Raises:
-        ValueError: if name is not a known backend key.
+    Return an InferenceBackend instance. MLX or HF
     """
     selected = (name or os.getenv("BACKEND", "mlx")).lower()
     if selected not in _BACKEND_MAP:

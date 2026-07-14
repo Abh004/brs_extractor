@@ -148,6 +148,18 @@ def _cosine_matrix(embeddings: np.ndarray) -> np.ndarray:
     return normed @ normed.T
 
 
+def _cosine_sims_against_pool(
+    emb: np.ndarray,
+    pool: list[np.ndarray],
+) -> np.ndarray:
+    """Return cosine similarity of emb against every item in pool. Empty array if pool empty."""
+    if not pool:
+        return np.array([], dtype=np.float64)
+    normed_emb = normalize_embeddings(emb[np.newaxis])[0]
+    normed_pool = normalize_embeddings(np.stack(pool))
+    return normed_pool @ normed_emb
+
+
 def _cosine_similarity_against_pool(
     emb: np.ndarray,
     pool: list[np.ndarray],
@@ -163,11 +175,8 @@ def _cosine_similarity_against_pool(
     Returns:
         Maximum cosine similarity, or 0.0 if pool is empty
     """
-    if not pool:
-        return 0.0
-    normed_emb = normalize_embeddings(emb[np.newaxis])[0]  # (D,)
-    normed_pool = normalize_embeddings(np.stack(pool))  # (M, D)
-    return float((normed_pool @ normed_emb).max())
+    sims = _cosine_sims_against_pool(emb, pool)
+    return float(sims.max()) if sims.size else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -437,49 +446,6 @@ def dedup_bullets_llm(
     )
 
 
-def merge_judge_outputs(
-    j1_text: str,
-    j2_text: str,
-    j3_text: str,
-    backend,
-    llm_handle,
-    max_bullets: int = 7,
-    candidate_threshold: float = CANDIDATE_THRESHOLD,
-) -> str:
-    """
-    Merge three judge bullet lists into a single clean markdown bullet list.
-
-    Args:
-        j1_text:             Raw output from Judge 1
-        j2_text:              Raw output from Judge 2
-        j3_text:              Raw output from Judge 3
-        backend:              InferenceBackend instance (see backend.py)
-        llm_handle:           Handle returned by backend.load_llm()
-        max_bullets:          Maximum bullets in merged output
-        candidate_threshold:  Embedding prefilter threshold (recall step)
-
-    Returns:
-        Merged markdown bullet list string, or "" if nothing survives
-    """
-
-    def _process(text: str) -> list[str]:
-        bullets = extract_bullets(text)
-        bullets = filter_meta_bullets(bullets)
-        bullets = filter_truncated_bullets(bullets)
-        return bullets
-
-    all_bullets = _process(j1_text) + _process(j2_text) + _process(j3_text)
-
-    if not all_bullets:
-        return ""
-
-    all_bullets = filter_substrings(all_bullets)
-    deduped = dedup_bullets_llm(all_bullets, backend, llm_handle, candidate_threshold)[
-        :max_bullets
-    ]
-    return "\n".join(f"- {b}" for b in deduped)
-
-
 def dedup_cross_block(
     refined: list[dict],
     backend,
@@ -536,23 +502,15 @@ def dedup_cross_block(
         kept_embeddings: list[np.ndarray] = []
 
         for bullet, emb in zip(bullets, chunk_embeddings):
-            max_sim = _cosine_similarity_against_pool(emb, pool_embeddings)
+            sims = _cosine_sims_against_pool(emb, pool_embeddings)
+            max_sim = float(sims.max()) if sims.size else 0.0
 
             if max_sim < candidate_threshold:
-                # Not even a plausible candidate — keep, no LLM call needed.
                 kept_bullets.append(bullet)
                 kept_embeddings.append(emb)
                 continue
 
-            # Plausible candidate — find which pool bullets it's close to
-            # and let the LLM decide if it's a true duplicate of any of them.
-            if pool_embeddings:
-                normed_emb = normalize_embeddings(emb[np.newaxis])[0]
-                normed_pool = normalize_embeddings(np.stack(pool_embeddings))
-                sims = normed_pool @ normed_emb
-                nearby_idx = [i for i, s in enumerate(sims) if s >= candidate_threshold]
-            else:
-                nearby_idx = []
+            nearby_idx = [i for i, s in enumerate(sims) if s >= candidate_threshold]
 
             if not nearby_idx:
                 kept_bullets.append(bullet)
@@ -563,7 +521,6 @@ def dedup_cross_block(
             local_embeddings = np.stack(
                 [pool_embeddings[i] for i in nearby_idx] + [emb]
             )
-            new_bullet_local_idx = len(local_bullets) - 1
             clusters = [
                 [i for i in range(len(local_bullets))]
             ]  # one cluster: ask LLM to confirm/split (or auto-accept, below)
