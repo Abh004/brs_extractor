@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import platform
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -594,14 +595,33 @@ _BACKEND_MAP = {
 }
 
 
+def _detect_backend() -> str:
+    """
+    Auto-detect the right backend for this machine:
+      - Apple Silicon (Darwin + arm64) → mlx
+      - Everything else (Intel Mac, Linux, Windows, CUDA boxes, Colab) → hf
+
+    Checked structurally (OS + CPU arch) rather than by trying to import
+    mlx, so the error message stays clear if mlx is supposed to be there
+    but isn't installed, instead of silently falling back to hf.
+    """
+    is_apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+    return "mlx" if is_apple_silicon else "hf"
+
+
 def get_backend(name: str | None = None) -> InferenceBackend:
     """
-    Return an InferenceBackend instance. MLX or HF
+    Return an InferenceBackend instance.
+
+    Resolution order:
+      1. Explicit `name` argument, if given.
+      2. BACKEND env var, if set.
+      3. Auto-detected from platform (Apple Silicon → mlx, else → hf).
     """
-    selected = (name or os.getenv("BACKEND", "mlx")).lower()
+    selected = (name or os.getenv("BACKEND") or _detect_backend()).lower()
     if selected not in _BACKEND_MAP:
         raise ValueError(
             f"Unknown backend {selected!r}. Choose from: {list(_BACKEND_MAP)}"
         )
-    print(f"[backend] Using: {selected}")
+    print(f"[backend] Using: {selected} (auto-detected)" if not (name or os.getenv("BACKEND")) else f"[backend] Using: {selected}")
     return _BACKEND_MAP[selected]()

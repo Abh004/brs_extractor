@@ -3,7 +3,7 @@ Configuration file for the VLM-PwC project.
 All paths, model names, and hyperparameters are defined here.
 """
 
-VIDEO_ID = "CiBwrjUeB8U"
+VIDEO_ID = "YazxN78R_6M"
 
 # File paths
 VIDEO_PATH = "input/video.mp4"
