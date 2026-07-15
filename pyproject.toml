@@ -8,18 +8,28 @@ version = "1.0.0"
 description = "Extract functional business requirements from product demo videos via VLM + LLM judges"
 requires-python = ">=3.12"
 dependencies = [
-    "mlx-vlm>=0.5",
-    "mlx-lm>=0.19.0",
+    # Platform-agnostic — used regardless of inference backend
     "sentence-transformers>=3.0.0",
     "numpy>=1.26.0",
     "opencv-python-headless>=4.8.0",
     "youtube-transcript-api>=1.0",
     "huggingface-hub>=0.23.0",
     "pyspellchecker>=0.8.3",
-    "bitsandbytes>=0.46.1",
-    "torchvision>=2.11",
-    "accelerate>=1.14.0"
+
+    # Apple Silicon only — MLXBackend
+    "mlx-vlm>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.19.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+
+    # Everything else (Linux, Windows, Intel Mac, Colab/CUDA) — HFBackend
+    "torch>=2.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "transformers>=4.46.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "accelerate>=1.14.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "torchvision>=0.27; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "pillow>=10.0.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
+
+[project.optional-dependencies]
+quantization = ["bitsandbytes>=0.46.1"]
 
 [tool.setuptools.packages.find]
 where = ["."]

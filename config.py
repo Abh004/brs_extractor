@@ -38,6 +38,7 @@ PROPOSER_PROMPT = (
 
 # Judges configuration — single judge, replacing the 3-judge panel
 JUDGE_MODEL = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+ENCODER_MODEL = "all-MiniLM-L6-v2"
 DEDUP_MODEL = "mlx-community/Qwen3-1.7B-4bit"
 
 JUDGE_SYSTEM = (

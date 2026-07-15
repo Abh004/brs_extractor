@@ -20,6 +20,7 @@ import re
 import numpy as np
 
 from utils import extract_balanced_json, normalize_embeddings
+from config import ENCODER_MODEL
 
 _model = None  # lazy-loaded on first use
 
@@ -69,7 +70,7 @@ def _get_model():
     if _model is None:
         from sentence_transformers import SentenceTransformer
 
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        _model = SentenceTransformer(ENCODER_MODEL)
     return _model
 
 
