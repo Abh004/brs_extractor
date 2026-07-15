@@ -99,21 +99,21 @@ BACKEND=hf python main.py
 
 ```
 ┌──────────────┐    ┌───────────────┐    ┌──────────────────┐    ┌──────────────┐
-│  YouTube     │───▶│  Data Prep    │───▶│  VLM Proposer    │───▶│  Judge LLM   │
-│  Video/      │    │  (chunk +     │    │  (Qwen3-VL-8B)   │    │  (Qwen3.5-9B)│
+│  Store       │───▶│  Data Prep    │───▶│  VLM Proposer    │───▶│  Judge LLM   │
+│  Video/      │    │  (chunk +     │    │  (Qwen3-VL-8B)   │    │ (Qwen3.5-9B) │
 │  Transcript  │    │  keyframe)    │    │  per chunk       │    │  sequential  │
 └──────────────┘    └───────────────┘    └──────────────────┘    └──────┬───────┘
                                                                         │
                                                                 ┌───────▼───────┐
-                                                                │  Embedding    │
+                                                                │   Embedding   │
                                                                 │  Dedup (CPU)  │
                                                                 │  cross-block  │
                                                                 └───────┬───────┘
                                                                         │
                                                                 ┌───────▼───────┐
-                                                                │  MoSCoW       │
-                                                                │  Priority     │
-                                                                │  (Qwen3-1.7B) │
+                                                                │    MoSCoW     │
+                                                                │   Priority    │
+                                                                │ (Qwen3-1.7B)  │
                                                                 └───────┬───────┘
                                                                         │
                                                                 ┌───────▼───────┐

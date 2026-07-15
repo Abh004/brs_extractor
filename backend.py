@@ -43,6 +43,8 @@ class InferenceBackend(ABC):
         system_prompt: str,
         max_tokens: int = 256,
         temperature: float = 0.0,
+        repetition_penalty: float | None = None,
+        repetition_context_size: int = 20,
     ) -> str:
         """Run multimodal inference. Returns raw text (not cleaned)."""
 
@@ -65,6 +67,8 @@ class InferenceBackend(ABC):
         system_prompt: str,
         user_prompt: str,
         max_tokens: int = 150,
+        repetition_penalty: float | None = None,
+        repetition_context_size: int = 20,
     ) -> str:
         """Run text-only inference using a previously loaded handle."""
 
@@ -293,6 +297,9 @@ class MLXBackend(InferenceBackend):
         mx.clear_cache()
 
     # Model IDs that are natively unified VLM architectures (Qwen3.5, etc.)
+    # but used here purely for text — routed through mlx_vlm with
+    # num_images=0 rather than mlx_lm, since these models don't load via
+    # mlx_lm's API.
     _VLM_BACKED_TEXT_MODELS = {
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
     }
@@ -415,6 +422,8 @@ class HFBackend(InferenceBackend):
         system_prompt: str,
         max_tokens: int = 256,
         temperature: float = 0.0,
+        repetition_penalty: float | None = None,
+        repetition_context_size: int = 20,  # noqa: ARG002 — no HF equivalent; kept for interface parity with MLXBackend
     ) -> str:
         from PIL import Image
 
@@ -452,6 +461,8 @@ class HFBackend(InferenceBackend):
             gen_kwargs.update({"do_sample": True, "temperature": temperature})
         else:
             gen_kwargs["do_sample"] = False
+        if repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = repetition_penalty
 
         output_ids = self._vlm_model.generate(**inputs, **gen_kwargs)
         # Decode only the newly generated tokens
@@ -498,6 +509,8 @@ class HFBackend(InferenceBackend):
         system_prompt: str,
         user_prompt: str,
         max_tokens: int = 150,
+        repetition_penalty: float | None = None,
+        repetition_context_size: int = 20,  # noqa: ARG002 — no HF equivalent; kept for interface parity with MLXBackend
     ) -> str:
         import torch
 
@@ -521,13 +534,16 @@ class HFBackend(InferenceBackend):
             )
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
+        gen_kwargs: dict = {
+            "max_new_tokens": max_tokens,
+            "do_sample": False,
+            "pad_token_id": tokenizer.eos_token_id,
+        }
+        if repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = repetition_penalty
+
         with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            output_ids = model.generate(**inputs, **gen_kwargs)
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = tokenizer.decode(new_ids, skip_special_tokens=True)
         if "<think>" in raw and "</think>" not in raw:
