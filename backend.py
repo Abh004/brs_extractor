@@ -90,7 +90,8 @@ class MLXBackend(InferenceBackend):
     """
 
     _NO_THINK_MODELS = {
-        "mlx-community/Qwen3-VL-8B-Instruct-MLX-4bit",
+        "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
+        "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         "mlx-community/Qwen3-1.7B-4bit",
     }
 

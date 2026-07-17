@@ -16,6 +16,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -180,10 +185,21 @@ class PipelineRunner:
             import traceback
             traceback.print_exc()
 
+    def _clean_output_files(self) -> None:
+        for path in [self._checkpoint_file, self._output_file, self._config_file, self._docx_file]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
     def _pipeline(self, cb: Callback | None = None):
         inference_elapsed = 0.0
         judges_elapsed = 0.0
         valid_chunks: list = []
+
+        # Clean old output before starting fresh
+        self._clean_output_files()
 
         # ── STAGE 1: DATA PREPARATION ──
         self._emit(cb, StageUpdate(1, "Data Preparation", "running", "Preparing data...", 0.0))

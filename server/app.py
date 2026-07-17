@@ -9,6 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
 import queue
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
