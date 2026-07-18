@@ -20,7 +20,7 @@ import platform
 from abc import ABC, abstractmethod
 from typing import Any
 
-from utils import clean_output, strip_think_blocks
+from utils import clean_output, is_truncated_think, strip_think_blocks
 
 
 # ── abstract base ─────────────────────────────────────────────────────────────
@@ -101,6 +101,25 @@ class MLXBackend(InferenceBackend):
         self._vlm_config = None
         self._vlm_model_id: str | None = None
 
+    def _mlx_load_with_fallback(self, load_fn, model_id: str, **kwargs):
+        """Try loading an MLX model, falling back to local files on network failure."""
+        try:
+            return load_fn(model_id, **kwargs)
+        except Exception as first_exc:
+            print(f"  [MLX] Remote load failed for {model_id}; trying local files only.")
+            try:
+                return load_fn(
+                    model_id,
+                    hf_hub_download_kwargs={"local_files_only": True},
+                    **kwargs,
+                )
+            except TypeError:
+                print(
+                    f"  [MLX] Local-only fallback not supported by this library version; "
+                    f"re-raising original error."
+                )
+                raise first_exc
+
     def load_vlm(self, model_id: str) -> None:
         import warnings
 
@@ -111,8 +130,8 @@ class MLXBackend(InferenceBackend):
         from mlx_vlm.utils import load_config
 
         print(f"  [MLX] Loading VLM: {model_id}")
-        self._vlm_model, self._vlm_processor = load(model_id)
-        self._vlm_config = load_config(model_id)
+        self._vlm_model, self._vlm_processor = self._mlx_load_with_fallback(load, model_id)
+        self._vlm_config = self._mlx_load_with_fallback(load_config, model_id)
         self._vlm_model_id = model_id
         print("  [MLX] VLM loaded.")
 
@@ -161,7 +180,7 @@ class MLXBackend(InferenceBackend):
 
         mx.clear_cache()
         raw = str(result.text) if hasattr(result, "text") else str(result)
-        if "<think>" in raw and "</think>" not in raw:
+        if is_truncated_think(raw):
             return ""
         return strip_think_blocks(raw)
 
@@ -184,8 +203,8 @@ class MLXBackend(InferenceBackend):
             from mlx_vlm.utils import load_config
 
             print(f"  [MLX] Loading unified VLM-as-LLM: {model_id}")
-            model, processor = load(model_id)
-            config = load_config(model_id)
+            model, processor = self._mlx_load_with_fallback(load, model_id)
+            config = self._mlx_load_with_fallback(load_config, model_id)
             print(f"  [MLX] Loaded: {model_id}")
             return {
                 "model": model,
@@ -199,7 +218,7 @@ class MLXBackend(InferenceBackend):
         from mlx_lm import load
 
         print(f"  [MLX] Loading LLM: {model_id}")
-        model, tokenizer = load(model_id)
+        model, tokenizer = self._mlx_load_with_fallback(load, model_id)
         handle = {
             "model": model,
             "tokenizer": tokenizer,
@@ -245,7 +264,7 @@ class MLXBackend(InferenceBackend):
                 verbose=False,
             )
             raw = str(result.text) if hasattr(result, "text") else str(result)
-            if "<think>" in raw and "</think>" not in raw:
+            if is_truncated_think(raw):
                 return ""
             return clean_output(raw)
 
@@ -277,7 +296,7 @@ class MLXBackend(InferenceBackend):
             logits_processors=logits_processors,
             verbose=False,
         )
-        if "<think>" in raw and "</think>" not in raw:
+        if is_truncated_think(raw):
             return ""
         return clean_output(raw)
 
@@ -325,29 +344,51 @@ def _from_pretrained_safe(cls, model_id: str, **kwargs):
     Load a pretrained HF object (config/tokenizer/processor/model),
     preferring transformers' own maintained implementation over a model
     repo's custom remote code.
-    """
-    try:
-        return cls.from_pretrained(model_id, trust_remote_code=False, **kwargs)
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "gated repo" in msg or "401" in msg or "restricted" in msg:
-            raise RuntimeError(
-                f"'{model_id}' is a gated or private Hugging Face repo — "
-                f"this environment isn't authenticated for it (or hasn't "
-                f"accepted the license yet). trust_remote_code can't fix "
-                f"authentication, so not retrying. Either:\n"
-                f"  1. Accept the license at "
-                f"https://huggingface.co/{model_id} while logged in, then "
-                f"authenticate this environment (huggingface_hub.login(token=...) "
-                f"or `huggingface-cli login`) with a token that has access, or\n"
-                f"  2. Point _MLX_TO_HF at an ungated mirror of this model."
-            ) from exc
 
+    Falls back to local files only if remote access fails (HF outage).
+    """
+    strategies = [
+        {"trust_remote_code": False, "local_files_only": False},
+        {"trust_remote_code": True, "local_files_only": False},
+        {"trust_remote_code": True, "local_files_only": True},
+    ]
+
+    last_exc: Exception | None = None
+    for i, strat in enumerate(strategies):
+        try:
+            return cls.from_pretrained(model_id, **strat, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            if "gated repo" in msg or "401" in msg or "restricted" in msg:
+                raise RuntimeError(
+                    f"'{model_id}' is a gated or private Hugging Face repo — "
+                    f"this environment isn't authenticated for it (or hasn't "
+                    f"accepted the license yet). trust_remote_code can't fix "
+                    f"authentication, so not retrying. Either:\n"
+                    f"  1. Accept the license at "
+                    f"https://huggingface.co/{model_id} while logged in, then "
+                    f"authenticate this environment (huggingface_hub.login(token=...) "
+                    f"or `huggingface-cli login`) with a token that has access, or\n"
+                    f"  2. Point _MLX_TO_HF at an ungated mirror of this model."
+                ) from exc
+            if i < len(strategies) - 1:
+                desc = ", ".join(f"{k}={v}" for k, v in strat.items() if not v)
+                if not desc:
+                    desc = "remote + trust_remote_code=False"
+                print(
+                    f"  [HF] Attempt {i + 1} ({desc}) failed ({exc!r}); "
+                    f"trying next strategy."
+                )
+
+    msg = str(last_exc).lower() if last_exc else "unknown error"
+    if "not found" in msg and "local_files_only" in msg:
         print(
-            f"  [HF] Native load of {model_id} failed ({exc!r}); "
-            f"retrying with trust_remote_code=True."
+            f"  [HF] Model {model_id} is not cached locally. "
+            f"Download it first with `huggingface-cli download {model_id}` "
+            f"or restore network access to HuggingFace Hub."
         )
-        return cls.from_pretrained(model_id, trust_remote_code=True, **kwargs)
+    raise last_exc  # type: ignore[misc]
 
 
 class HFBackend(InferenceBackend):
@@ -471,8 +512,7 @@ class HFBackend(InferenceBackend):
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = self._vlm_processor.decode(new_ids, skip_special_tokens=True)
 
-        # Defensive cleanup in case enable_thinking=False was ignored (some converted/community chat templates drop the conditional entirely)
-        if "<think>" in raw and "</think>" not in raw:
+        if is_truncated_think(raw):
             return ""
         return strip_think_blocks(raw)
 
@@ -548,7 +588,7 @@ class HFBackend(InferenceBackend):
             output_ids = model.generate(**inputs, **gen_kwargs)
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = tokenizer.decode(new_ids, skip_special_tokens=True)
-        if "<think>" in raw and "</think>" not in raw:
+        if is_truncated_think(raw):
             return ""
         return clean_output(raw)
 
@@ -588,6 +628,32 @@ def _mlx_to_hf(model_id: str) -> str:
     Convert an mlx-community model ID to its canonical HuggingFace equivalent.
     """
     return _MLX_TO_HF.get(model_id, model_id)
+
+
+def check_hf_reachable(timeout: float = 5.0) -> bool:
+    """
+    Quick connectivity check against HuggingFace Hub.
+    Returns False if HF appears unreachable (network issue, not auth).
+    """
+    try:
+        import urllib.request
+
+        urllib.request.urlopen("https://huggingface.co", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def print_hf_unreachable_warning() -> None:
+    """Print a clear warning banner when HuggingFace Hub is unreachable."""
+    print(
+        "\n" + "=" * 62 + "\n"
+        "  WARNING: HuggingFace Hub is unreachable.\n"
+        "  Pipeline will attempt to use locally cached models only.\n"
+        "  Missing uncached models will cause stage-specific\n"
+        "  graceful degradation or clear error messages.\n"
+        + "=" * 62 + "\n"
+    )
 
 
 _BACKEND_MAP = {

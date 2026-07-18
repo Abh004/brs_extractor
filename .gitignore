@@ -19,7 +19,6 @@ env/
 keyframes/
 output/
 input/
-old_ops/
 
 # Node
 node_modules/
@@ -30,7 +29,6 @@ node_modules/
 .LSOverride
 
 # Model weights (downloaded at runtime via HuggingFace Hub)
-# They live in ~/.cache/huggingface/ — never in the repo
 *.safetensors
 *.bin
 *.gguf

@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from backend import get_backend
+from backend import check_hf_reachable, get_backend, print_hf_unreachable_warning
 from config import (
     CHUNK_SIZE_SEC,
     DEDUP_MODEL,
@@ -40,6 +40,12 @@ from judges.dedup import dedup_cross_block, extract_bullets
 from judges.priority import classify_priorities
 from models import VLMProposer
 from utils import flag_unknown_words
+
+try:
+    import mlx.core as _mx
+    _HAS_MLX = True
+except ImportError:
+    _HAS_MLX = False
 
 
 @dataclass
@@ -169,11 +175,8 @@ class PipelineRunner:
 
     @staticmethod
     def _clear_gpu_cache():
-        try:
-            import mlx.core as mx
-            mx.clear_cache()
-        except ImportError:
-            pass
+        if _HAS_MLX:
+            _mx.clear_cache()
 
     def _run_sync(self, cb: Callback | None = None):
         try:
@@ -231,6 +234,10 @@ class PipelineRunner:
         stage2_start = time.time()
         self._check_cancelled()
 
+        # Check HF reachability for user awareness
+        if not check_hf_reachable():
+            print_hf_unreachable_warning()
+
         # Clear any stale MLX GPU state from previous runs (safe no-op if mlx not available)
         self._clear_gpu_cache()
         self._check_cancelled()
@@ -242,10 +249,14 @@ class PipelineRunner:
                                    "Loading VLM proposer...", 0.3))
         self._check_cancelled()
         try:
-            proposer = VLMProposer(backend=backend)
+            proposer = _with_retry(
+                fn=lambda: VLMProposer(backend=backend),
+                max_retries=_VLM_MAX_RETRIES,
+                label="VLM proposer load",
+            )
         except Exception as e:
             self._emit(cb, StageUpdate(2, "Model Initialization", "error",
-                                        f"VLM load failed: {e}", 0,
+                                        f"VLM load failed after retries: {e}", 0,
                                         elapsed=time.time() - stage2_start))
             raise
         self._check_cancelled()
@@ -253,7 +264,13 @@ class PipelineRunner:
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",
                                    "Validating judge models...", 0.6))
         judges_panel = JudgesPanel(backend=backend)
-        judges_panel.preload()
+        try:
+            judges_panel.preload()
+        except Exception as e:
+            self._emit(cb, StageUpdate(2, "Model Initialization", "error",
+                                        f"Judge model unavailable: {e}", 0.6,
+                                        elapsed=time.time() - stage2_start))
+            raise
         self._check_cancelled()
         self._emit(cb, StageUpdate(2, "Model Initialization", "done",
                                     "Models initialized", 1.0,
@@ -393,82 +410,10 @@ class PipelineRunner:
                                     f"Refined {len(refined)} chunks{fail_msg}",
                                     1.0, elapsed=judges_elapsed))
 
-        # ── STAGE 5: POST-PROCESSING & OUTPUT ──
-        self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                   "Dedup, priorities, JSON...", 0.0))
-        stage5_start = time.time()
-        self._check_cancelled()
-
-        dedup_removed = 0
-        all_bullets: list[str] = []
-        judge3_handle = None
-        judge3_load_elapsed = 0.0
-        dedup_elapsed = 0.0
-        priority_elapsed = 0.0
-
-        load_start = time.time()
-        try:
-            judge3_handle = backend.load_llm(DEDUP_MODEL)
-        except Exception as e:
-            pass
-        judge3_load_elapsed = time.time() - load_start
-
-        if judge3_handle is not None:
-            try:
-                self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                            "Cross-block deduplication...", 0.1))
-                dedup_start = time.time()
-                refined, dedup_removed = dedup_cross_block(
-                    refined, backend=backend, llm_handle=judge3_handle
-                )
-                dedup_elapsed = time.time() - dedup_start
-            except Exception as e:
-                dedup_elapsed = time.time() - dedup_start
-                dedup_removed = 0
-
-            per_block, all_bullets = self._flatten_flagged_bullets(refined)
-
-            self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                        f"Classifying {len(all_bullets)} priorities...", 0.4))
-            priority_start = time.time()
-            try:
-                priorities = classify_priorities(
-                    all_bullets, backend=backend, handle=judge3_handle
-                )
-                priority_elapsed = time.time() - priority_start
-            except Exception as e:
-                priority_elapsed = time.time() - priority_start
-                priorities = ["S"] * len(all_bullets)
-
-            blocks = self._assemble_blocks(refined, per_block, priorities=priorities)
-            self._dump_json(blocks, refined, inference_elapsed, judges_elapsed, dedup_removed)
-
-            # ── STAGE 6: BRS CONFIG GENERATION ──
-            self._emit(cb, StageUpdate(6, "Config Generation", "running",
-                                        "Inferring document structure...", 0.0))
-            stage6_start = time.time()
-            try:
-                generate_config(
-                    all_bullets, self._config_file, backend=backend, handle=judge3_handle
-                )
-                self._emit(cb, StageUpdate(6, "Config Generation", "done",
-                                            "Config generated",
-                                            1.0, elapsed=time.time() - stage6_start))
-            except Exception as e:
-                self._emit(cb, StageUpdate(6, "Config Generation", "error",
-                                            f"Config failed: {e}",
-                                            0, elapsed=time.time() - stage6_start))
-            finally:
-                backend.unload_llm(judge3_handle)
-        else:
-            all_bullets = self._write_json(
-                refined, inference_elapsed, judges_elapsed, dedup_removed
-            )
-
-        self._emit(cb, StageUpdate(5, "Post-processing", "done",
-                                    f"Removed {dedup_removed} dupes, "
-                                    f"{len(all_bullets)} requirements",
-                                    1.0, elapsed=time.time() - stage5_start))
+        # ── STAGE 5+6: POST-PROCESSING, PRIORITIES, CONFIG ──
+        dedup_removed, all_bullets = self._run_post_processing(
+            refined, backend, judges_elapsed, inference_elapsed, cb
+        )
 
         # ── STAGE 7: DOCX GENERATION ──
         self._emit(cb, StageUpdate(7, "DOCX Generation", "running",
@@ -488,9 +433,13 @@ class PipelineRunner:
                                     f"Pipeline finished in {total:.1f}s",
                                     1.0, elapsed=total))
 
-    def _flatten_flagged_bullets(self, refined: list) -> tuple[list[list[str]], list[str]]:
+    def _flatten_and_assemble(
+        self, refined: list, priorities: list[str] | None = None,
+    ) -> tuple[list[dict], list[list[str]], list[str]]:
         per_block: list[list[str]] = []
         all_bullets: list[str] = []
+        cursor = 0
+        blocks: list[dict] = []
         for req in refined:
             bullets = (
                 extract_bullets(req["refined_requirements"])
@@ -500,34 +449,29 @@ class PipelineRunner:
             bullets = [flag_unknown_words(b) for b in bullets]
             per_block.append(bullets)
             all_bullets.extend(bullets)
-        return per_block, all_bullets
-
-    def _assemble_blocks(
-        self, refined: list, per_block: list[list[str]],
-        priorities: list[str] | None = None,
-    ) -> list[dict]:
-        blocks = []
-        cursor = 0
-        for req, bullets in zip(refined, per_block):
             if priorities is not None:
-                slice_ = priorities[cursor: cursor + len(bullets)]
+                slice_ = priorities[cursor:cursor + len(bullets)]
                 cursor += len(bullets)
                 bullet_payload = [
                     {"text": b, "priority": p} for b, p in zip(bullets, slice_)
                 ]
             else:
-                bullet_payload = bullets
+                bullet_payload = [{"text": b} for b in bullets]
             blocks.append({
                 "minute_block": req["minute_block"],
                 "time_range": req["time_range"],
                 "bullets": bullet_payload,
                 "error": req.get("error"),
             })
-        return blocks
+        return blocks, per_block, all_bullets
 
-    def _dump_json(self, blocks: list[dict], refined: list,
-                    inference_elapsed: float, judges_elapsed: float,
-                    dedup_removed: int) -> None:
+    def _dump_json(
+        self, refined: list, inference_elapsed: float,
+        judges_elapsed: float, dedup_removed: int = 0,
+        priorities: list[str] | None = None,
+        return_bullets: bool = False,
+    ) -> list[str] | None:
+        blocks, _, all_bullets = self._flatten_and_assemble(refined, priorities=priorities)
         os.makedirs(os.path.dirname(self._output_file), exist_ok=True)
         total = inference_elapsed + judges_elapsed
         successful = sum(1 for r in refined if r.get("refined_requirements"))
@@ -544,42 +488,77 @@ class PipelineRunner:
         }
         with open(self._output_file, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
+        if return_bullets:
+            return all_bullets
+        return None
 
-    def _write_json(self, refined: list, inference_elapsed: float,
-                     judges_elapsed: float, dedup_removed: int) -> list[str]:
-        total = inference_elapsed + judges_elapsed
-        successful = sum(1 for r in refined if r.get("refined_requirements"))
-        blocks: list[dict] = []
+    def _run_post_processing(
+        self, refined: list, backend, judges_elapsed: float,
+        inference_elapsed: float, cb: Callback | None = None,
+    ) -> tuple[int, list[str]]:
+        dedup_removed = 0
         all_bullets: list[str] = []
-        for req in refined:
-            bullets = (
-                extract_bullets(req["refined_requirements"])
-                if req.get("refined_requirements")
-                else []
+
+        self._emit(cb, StageUpdate(5, "Post-processing", "running",
+                                   "Loading judge3...", 0.0))
+        self._check_cancelled()
+
+        judge3_handle = None
+        try:
+            judge3_handle = backend.load_llm(DEDUP_MODEL)
+        except Exception:
+            pass
+
+        if judge3_handle is not None:
+            try:
+                self._emit(cb, StageUpdate(5, "Post-processing", "running",
+                                            "Cross-block deduplication...", 0.1))
+                refined, dedup_removed = dedup_cross_block(
+                    refined, backend=backend, llm_handle=judge3_handle
+                )
+
+                _, _, all_bullets = self._flatten_and_assemble(refined)
+
+                self._emit(cb, StageUpdate(5, "Post-processing", "running",
+                                            f"Classifying {len(all_bullets)} priorities...", 0.4))
+                try:
+                    priorities = classify_priorities(
+                        all_bullets, backend=backend, handle=judge3_handle
+                    )
+                except Exception:
+                    priorities = ["S"] * len(all_bullets)
+
+                self._dump_json(refined, inference_elapsed, judges_elapsed,
+                                dedup_removed, priorities=priorities)
+
+                # Stage 6
+                self._emit(cb, StageUpdate(6, "Config Generation", "running",
+                                            "Inferring document structure...", 0.0))
+                stage6_start = time.time()
+                try:
+                    generate_config(
+                        all_bullets, self._config_file, backend=backend,
+                        handle=judge3_handle,
+                    )
+                    self._emit(cb, StageUpdate(6, "Config Generation", "done",
+                                                "Config generated",
+                                                1.0, elapsed=time.time() - stage6_start))
+                except Exception as e:
+                    self._emit(cb, StageUpdate(6, "Config Generation", "error",
+                                                f"Config failed: {e}",
+                                                0, elapsed=time.time() - stage6_start))
+            finally:
+                backend.unload_llm(judge3_handle)
+        else:
+            all_bullets = self._dump_json(
+                refined, inference_elapsed, judges_elapsed, return_bullets=True,
             )
-            bullets = [flag_unknown_words(b) for b in bullets]
-            all_bullets.extend(bullets)
-            blocks.append({
-                "minute_block": req["minute_block"],
-                "time_range": req["time_range"],
-                "bullets": bullets,
-                "error": req.get("error"),
-            })
-        output = {
-            "summary": {
-                "total_chunks": len(refined),
-                "successfully_refined": successful,
-                "duplicate_bullets_removed_cross_block": 0,
-                "inference_time_sec": round(inference_elapsed, 1),
-                "judges_time_sec": round(judges_elapsed, 1),
-                "total_time_sec": round(total, 1),
-            },
-            "requirements": blocks,
-        }
-        os.makedirs(os.path.dirname(self._output_file), exist_ok=True)
-        with open(self._output_file, "w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
-        return all_bullets
+
+        self._emit(cb, StageUpdate(5, "Post-processing", "done",
+                                    f"Removed {dedup_removed} dupes, "
+                                    f"{len(all_bullets)} requirements",
+                                    1.0, elapsed=0))
+        return dedup_removed, all_bullets
 
     def _generate_docx(self) -> None:
         if not os.path.exists(self._config_file):

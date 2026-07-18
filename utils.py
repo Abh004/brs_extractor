@@ -46,6 +46,11 @@ def strip_think_blocks(text: str) -> str:
     return _THINK_BLOCK.sub("", text).strip()
 
 
+def is_truncated_think(text: str) -> bool:
+    """Return True if output has an unclosed <think> block (truncated)."""
+    return "<think>" in text and "</think>" not in text
+
+
 def clean_output(text: str) -> str:
     """
     Full post-processing pass applied to every model output:
@@ -172,19 +177,22 @@ def flag_unknown_words(text: str) -> str:
     """
     spell = _get_spellchecker()
     words = re.findall(r"[A-Za-z']+", text)
-    candidates = {
+    candidates = [
         w
         for w in words
         if len(w) > 3
         and w[0].islower()
         and w.lower() not in spell
         and not _is_valid_compound(w, spell)
-    }
+    ]
     if not candidates:
         return text
-    for w in candidates:
-        text = re.sub(rf"\b{re.escape(w)}\b", f"[[{w}]]", text)
-    return text
+    pattern = r"\b(?:" + "|".join(re.escape(w) for w in candidates) + r")\b"
+
+    def _bracket(m: re.Match) -> str:
+        return f"[[{m.group(0)}]]"
+
+    return re.sub(pattern, _bracket, text)
 
 
 # ── JSON extraction ───────────────────────────────────────────────────────────

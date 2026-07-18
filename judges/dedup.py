@@ -50,6 +50,15 @@ CANDIDATE_THRESHOLD = 0.35
 # Cosine similarity above which two bullets are treated as obvious duplicates without spending an LLM call — the complement to CANDIDATE_THRESHOLD above.
 AUTO_ACCEPT_THRESHOLD = 0.85
 
+def _jaccard_similarity(a: str, b: str) -> float:
+    """Jaccard similarity over word tokens — used as fallback when the embedding model is unavailable."""
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union if union > 0 else 0.0
+
+
 _DEDUP_SYSTEM_PROMPT = """You are deduplicating a list of software requirement bullets that describe the same underlying system.
 
 You will be given a numbered list of requirement bullets that an embedding model has flagged as POSSIBLY describing the same requirement. Some are true duplicates (same requirement, different wording). Some are genuinely distinct requirements that happen to share vocabulary or topic. Your job is to tell them apart.
@@ -68,9 +77,14 @@ Rules:
 def _get_model():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
 
-        _model = SentenceTransformer(ENCODER_MODEL)
+            _model = SentenceTransformer(ENCODER_MODEL)
+        except Exception as e:
+            print(f"  [dedup] Embedding model '{ENCODER_MODEL}' unavailable ({e}).")
+            print("  [dedup] Falling back to Jaccard-based dedup.")
+            _model = None
     return _model
 
 
@@ -118,17 +132,15 @@ def filter_substrings(bullets: list[str]) -> list[str]:
     def _norm(s: str) -> str:
         return re.sub(r"['''\"]", "", s.lower()).strip()
 
-    normalized = [_norm(b) for b in bullets]
-    kept = []
-    for i, b_norm in enumerate(normalized):
-        is_sub = any(
-            b_norm in other and b_norm != other
-            for j, other in enumerate(normalized)
-            if i != j
-        )
-        if not is_sub:
-            kept.append(bullets[i])
-    return kept
+    indexed = sorted(
+        [(i, _norm(b)) for i, b in enumerate(bullets)],
+        key=lambda x: -len(x[1]),
+    )
+    kept: list[tuple[int, str]] = []
+    for idx, norm in indexed:
+        if not any(norm in other_norm for _, other_norm in kept):
+            kept.append((idx, norm))
+    return [bullets[i] for i, _ in kept]
 
 
 def _cosine_matrix(embeddings: np.ndarray) -> np.ndarray:
@@ -155,25 +167,6 @@ def _cosine_sims_against_pool(
     normed_emb = normalize_embeddings(emb[np.newaxis])[0]
     normed_pool = normalize_embeddings(np.stack(pool))
     return normed_pool @ normed_emb
-
-
-def _cosine_similarity_against_pool(
-    emb: np.ndarray,
-    pool: list[np.ndarray],
-) -> float:
-    """
-    Return the maximum cosine similarity between a single embedding and a
-    pool of previously-seen embeddings. Returns 0.0 if the pool is empty.
-
-    Args:
-        emb:  (D,) float array for the candidate bullet
-        pool: list of (D,) float arrays already accepted
-
-    Returns:
-        Maximum cosine similarity, or 0.0 if pool is empty
-    """
-    sims = _cosine_sims_against_pool(emb, pool)
-    return float(sims.max()) if sims.size else 0.0
 
 
 # Candidate clustering (embedding prefilter — recall, not precision)
@@ -232,8 +225,20 @@ def cluster_candidates(
         return [[i] for i in range(n)], np.zeros((n, 0))
 
     model = _get_model()
-    embeddings = model.encode(bullets, convert_to_numpy=True, show_progress_bar=False)
-    sim = _cosine_matrix(embeddings)
+    sim: np.ndarray
+    embeddings: np.ndarray
+
+    if model is not None:
+        embeddings = model.encode(bullets, convert_to_numpy=True, show_progress_bar=False)
+        sim = _cosine_matrix(embeddings)
+    else:
+        print("  [dedup] Using Jaccard-based candidate clustering (no embedding model).")
+        embeddings = np.zeros((n, 0))
+        sim = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                s = _jaccard_similarity(bullets[i], bullets[j])
+                sim[i, j] = sim[j, i] = s
 
     edges = [
         (i, j) for i in range(n) for j in range(i + 1, n) if sim[i, j] >= threshold
@@ -446,6 +451,10 @@ def dedup_cross_block(
          total number of bullets removed across all blocks)
     """
     model = _get_model()
+    if model is None:
+        print("  [dedup] Embedding model unavailable; skipping cross-block dedup.")
+        return [dict(req) for req in refined], 0
+
     pool_bullets: list[str] = []
     pool_embeddings: list[np.ndarray] = []
     total_removed = 0

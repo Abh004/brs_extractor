@@ -35,8 +35,17 @@ class JudgesPanel:
         try:
             snapshot_download(JUDGE_MODEL, local_files_only=False)
             print(f"  ✓ Judge: {JUDGE_MODEL}")
-        except Exception as exc:
-            raise RuntimeError(f"Judge model unavailable: {JUDGE_MODEL}") from exc
+        except Exception:
+            # Remote download failed — try local cache
+            print(f"  ⚠ Remote download failed for {JUDGE_MODEL}; trying local cache...")
+            try:
+                snapshot_download(JUDGE_MODEL, local_files_only=True)
+                print(f"  ✓ Judge (cached): {JUDGE_MODEL}")
+            except Exception:
+                raise RuntimeError(
+                    f"Judge model unavailable (remote unreachable and no local cache): "
+                    f"{JUDGE_MODEL}"
+                )
 
     def load_all(self) -> None:
         print("Loading judge model...")
