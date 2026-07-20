@@ -47,7 +47,7 @@ CUDA/CPU box (`BACKEND=hf`). Includes a FastAPI web UI with WebSocket progress s
   - `job_manager.py` — `JobManager` singleton with in-memory job registry, concurrency
     control (one job at a time, GPU exclusivity), `JobStatus` enum (pending/running/
     completed/failed/cancelled), and thread-based job execution.
-- `static/` — Web UI frontend (GitHub-dark themed SPA):
+- `static/` — Web UI frontend:
   - `index.html` — Input tabs (YouTube ID / Upload Video / Transcript Only), progress
     display with stage indicators, results view with collapsible blocks and download links.
   - `app.js` — WebSocket connection, status polling fallback, stage indicator updates,
