@@ -23,28 +23,15 @@ async function startPipeline() {
   const formData = new FormData();
   const activeTab = document.querySelector('.tab-btn.active').dataset.tab;
 
-  let videoId = null;
-  const backend = document.getElementById('backend-select').value;
-
-  if (activeTab === 'youtube') {
-    videoId = document.getElementById('video-id').value.trim();
-    if (!videoId) {
-      showError('Please enter a YouTube Video ID.');
-      resetButton();
-      return;
-    }
-    formData.append('video_id', videoId);
-  } else if (activeTab === 'upload') {
+  if (activeTab === 'upload') {
     const videoFile = document.getElementById('video-file').files[0];
     const transcriptFile = document.getElementById('transcript-file-upload').files[0];
-    videoId = document.getElementById('video-id-upload').value.trim();
 
     if (videoFile) formData.append('video_file', videoFile);
     if (transcriptFile) formData.append('transcript_file', transcriptFile);
-    if (videoId) formData.append('video_id', videoId);
 
-    if (!videoFile && !transcriptFile && !videoId) {
-      showError('Upload a video file, transcript file, or provide a YouTube ID.');
+    if (!videoFile && !transcriptFile) {
+      showError('Upload a video file or transcript file.');
       resetButton();
       return;
     }
@@ -57,8 +44,6 @@ async function startPipeline() {
     }
     formData.append('transcript_file', transcriptFile);
   }
-
-  if (backend) formData.append('backend', backend);
 
   try {
     const resp = await fetch('/api/run', { method: 'POST', body: formData });
@@ -226,6 +211,9 @@ async function handleJobDone(msg) {
     return;
   }
 
+  document.getElementById('progress-section').classList.add('hidden');
+  document.getElementById('results-section').classList.remove('hidden');
+
   const jobId = currentJobId;
   try {
     const resp = await fetch('/api/results/' + jobId);
@@ -233,41 +221,12 @@ async function handleJobDone(msg) {
     const data = await resp.json();
     displayResults(data.results);
   } catch (e) {
-    showError('Failed to load results: ' + e.message);
+    console.error('Failed to load results:', e);
   }
+  setupDownloads();
 }
 
-/* ── Results display ── */
 function displayResults(results) {
-  document.getElementById('progress-section').classList.add('hidden');
-  document.getElementById('results-section').classList.remove('hidden');
-
-  if (!results || !results.summary) {
-    document.getElementById('requirements-list').innerHTML =
-      '<p style="color: #8b949e;">No results returned.</p>';
-    return;
-  }
-
-  const s = results.summary;
-  document.getElementById('results-summary').innerHTML = `
-    <div class="summary-item">
-      <div class="value">${s.total_chunks || 0}</div>
-      <div class="label">Chunks</div>
-    </div>
-    <div class="summary-item">
-      <div class="value">${s.successfully_refined || 0}</div>
-      <div class="label">Refined</div>
-    </div>
-    <div class="summary-item">
-      <div class="value">${s.duplicate_bullets_removed_cross_block || 0}</div>
-      <div class="label">Dupes Removed</div>
-    </div>
-    <div class="summary-item">
-      <div class="value">${s.total_time_sec || 0}s</div>
-      <div class="label">Total Time</div>
-    </div>
-  `;
-
   const reqs = results.requirements || [];
   const reqList = document.getElementById('requirements-list');
   reqList.innerHTML = '<h3>Extracted Requirements</h3>';
@@ -332,8 +291,6 @@ function displayResults(results) {
     div.appendChild(body);
     reqList.appendChild(div);
   }
-
-  setupDownloads();
 }
 
 function highlightFlagged(text) {
@@ -341,13 +298,9 @@ function highlightFlagged(text) {
 }
 
 function setupDownloads() {
-  const files = ['extracted_requirements.json', 'BRS.docx', 'project_config.json'];
-  const ids = ['dl-json', 'dl-docx', 'dl-config'];
-  ids.forEach((id, i) => {
-    const el = document.getElementById(id);
-    el.href = '/api/download/' + files[i];
-    el.textContent = files[i];
-  });
+  const el = document.getElementById('dl-docx');
+  el.href = '/api/download/BRS.docx';
+  el.textContent = 'BRS.docx';
 }
 
 /* ── Error handling ── */

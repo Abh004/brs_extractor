@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BRS Pipeline</title>
-<link rel="stylesheet" href="/static/styles.css">
+<link rel="stylesheet" href="/static/styles.css?v=5">
 </head>
 <body>
 <div class="container">
@@ -16,20 +16,11 @@
     <h2>Input Configuration</h2>
 
     <div class="tabs">
-      <button class="tab-btn active" data-tab="youtube">YouTube ID</button>
-      <button class="tab-btn" data-tab="upload">Upload Video</button>
+      <button class="tab-btn active" data-tab="upload">Upload Video</button>
       <button class="tab-btn" data-tab="transcript">Transcript Only</button>
     </div>
 
-    <div class="tab-content" id="tab-youtube">
-      <div class="form-group">
-        <label for="video-id">YouTube Video ID</label>
-        <input type="text" id="video-id" placeholder="e.g. YazxN78R_6M">
-        <span class="hint">Transcript will be fetched automatically. Video must exist at <code>input/video.mp4</code> or be uploaded separately.</span>
-      </div>
-    </div>
-
-    <div class="tab-content hidden" id="tab-upload">
+    <div class="tab-content" id="tab-upload">
       <div class="form-group">
         <label for="video-file">Video File</label>
         <input type="file" id="video-file" accept=".mp4,.avi,.mov,.mkv">
@@ -38,12 +29,7 @@
       <div class="form-group">
         <label for="transcript-file">Transcript (optional)</label>
         <input type="file" id="transcript-file-upload" accept=".json">
-        <span class="hint">If not provided, transcript will be fetched from YouTube ID.</span>
-      </div>
-      <div class="form-group">
-        <label for="video-id-video">YouTube ID (fallback)</label>
-        <input type="text" id="video-id-upload" placeholder="e.g. YazxN78R_6M">
-        <span class="hint">Used to fetch transcript if no transcript file is uploaded.</span>
+        <span class="hint">Upload a transcript JSON file if available.</span>
       </div>
     </div>
 
@@ -55,19 +41,8 @@
       </div>
     </div>
 
-    <div class="form-row">
-      <div class="form-group">
-        <label for="backend-select">Backend</label>
-        <select id="backend-select">
-          <option value="">Auto-detect</option>
-          <option value="mlx">MLX (Apple Silicon)</option>
-          <option value="hf">HuggingFace (CUDA/CPU)</option>
-        </select>
-      </div>
-    </div>
-
     <button id="run-btn" class="btn btn-primary" onclick="startPipeline()">
-      <span class="btn-icon">&#9654;</span> Start Pipeline
+      <span class="btn-icon">&#9654;</span> Generate Requirements
     </button>
   </div>
 
@@ -85,18 +60,12 @@
   </div>
 
   <div id="results-section" class="card hidden">
-    <h2>Results</h2>
-    <div id="results-summary" class="results-summary"></div>
+    <h2>Requirements</h2>
     <div id="requirements-list" class="requirements-list"></div>
     <div class="downloads">
-      <h3>Downloads</h3>
-      <div class="download-buttons">
-        <a id="dl-json" class="btn btn-secondary" download>extracted_requirements.json</a>
-        <a id="dl-docx" class="btn btn-secondary" download>BRS.docx</a>
-        <a id="dl-config" class="btn btn-secondary" download>project_config.json</a>
-      </div>
+      <a id="dl-docx" class="btn btn-download" download>BRS.docx</a>
     </div>
-    <button class="btn btn-secondary" onclick="resetUI()">Run Another</button>
+    <button class="btn btn-primary-wide" onclick="resetUI()">Run Again</button>
   </div>
 
   <div id="error-section" class="card error-card hidden">
@@ -106,6 +75,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>
