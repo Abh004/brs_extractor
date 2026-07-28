@@ -32,20 +32,22 @@ class JudgesPanel:
     def preload(self) -> None:
         from huggingface_hub import snapshot_download
 
+        # Check local cache first — instant if cached, no progress bar
+        try:
+            snapshot_download(JUDGE_MODEL, local_files_only=True)
+            print(f"  ✓ Judge (cached): {JUDGE_MODEL}")
+            return
+        except Exception:
+            pass
+
         try:
             snapshot_download(JUDGE_MODEL, local_files_only=False)
             print(f"  ✓ Judge: {JUDGE_MODEL}")
-        except Exception:
-            # Remote download failed — try local cache
-            print(f"  ⚠ Remote download failed for {JUDGE_MODEL}; trying local cache...")
-            try:
-                snapshot_download(JUDGE_MODEL, local_files_only=True)
-                print(f"  ✓ Judge (cached): {JUDGE_MODEL}")
-            except Exception:
-                raise RuntimeError(
-                    f"Judge model unavailable (remote unreachable and no local cache): "
-                    f"{JUDGE_MODEL}"
-                )
+        except Exception as e:
+            raise RuntimeError(
+                f"Judge model unavailable (remote unreachable and no local cache): "
+                f"{JUDGE_MODEL}"
+            ) from e
 
     def load_all(self) -> None:
         print("Loading judge model...")

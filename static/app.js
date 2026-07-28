@@ -179,22 +179,10 @@ function handleUpdate(msg) {
   if (msg.stage > 0 && msg.stage <= 7) {
     updateStagePills(msg.stage, msg.status);
   }
-
-  document.getElementById('progress-message').textContent =
-    '[' + msg.stage_name + '] ' + msg.message;
-
-  if (msg.log && msg.log.length) {
-    const logEl = document.getElementById('log-output');
-    logEl.textContent = msg.log.join('\n');
-    document.getElementById('log-container').scrollTop =
-      document.getElementById('log-container').scrollHeight;
-  }
 }
 
 function handlePollUpdate(status) {
   document.getElementById('progress-bar').style.width = (status.progress || 0) + '%';
-  document.getElementById('progress-message').textContent =
-    '[' + (status.stage_name || '...') + '] ' + (status.message || 'Processing...');
 }
 
 /* ── Job completion ── */

@@ -260,30 +260,6 @@ header h1 {
   transition: width 0.3s ease;
 }
 
-.progress-message {
-  font-size: 0.85rem;
-  color: #666;
-  margin-bottom: 0.75rem;
-  font-family: 'SFMono-Regular', Consolas, monospace;
-}
-
-.log-container {
-  background: #f8f8f8;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  padding: 0.75rem;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-#log-output {
-  font-family: 'SFMono-Regular', Consolas, monospace;
-  font-size: 0.78rem;
-  color: #555;
-  white-space: pre-wrap;
-  word-break: break-all;
-  line-height: 1.4;
-}
 
 /* ── results ── */
 .requirement-block {

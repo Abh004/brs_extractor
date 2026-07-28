@@ -96,6 +96,7 @@ class MLXBackend(InferenceBackend):
     }
 
     def __init__(self) -> None:
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         self._vlm_model = None
         self._vlm_processor = None
         self._vlm_config = None
@@ -488,7 +489,7 @@ class HFBackend(InferenceBackend):
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",
-                enable_thinking=False,
+                processor_kwargs={"enable_thinking": False},
             ).to(self._vlm_model.device)
         except TypeError:
             inputs = self._vlm_processor.apply_chat_template(
@@ -496,6 +497,7 @@ class HFBackend(InferenceBackend):
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=True,
+                enable_thinking = False,
                 return_tensors="pt",
             ).to(self._vlm_model.device)
 
@@ -568,11 +570,11 @@ class HFBackend(InferenceBackend):
                 messages,
                 add_generation_prompt=True,
                 tokenize=False,
-                enable_thinking=False,
+                processor_kwargs={"enable_thinking": False},
             )
         except TypeError:
             prompt = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
+                messages, add_generation_prompt=True, tokenize=False, enable_thinking=False,
             )
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
