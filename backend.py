@@ -652,8 +652,6 @@ def print_hf_unreachable_warning() -> None:
         "\n" + "=" * 62 + "\n"
         "  WARNING: HuggingFace Hub is unreachable.\n"
         "  Pipeline will attempt to use locally cached models only.\n"
-        "  Missing uncached models will cause stage-specific\n"
-        "  graceful degradation or clear error messages.\n"
         + "=" * 62 + "\n"
     )
 
