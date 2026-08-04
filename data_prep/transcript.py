@@ -4,6 +4,11 @@ import math
 from config import CHUNK_SIZE_SEC
 
 
+def _new_chunk() -> dict:
+    """Return an empty chunk dict — shared shape used across data_prep."""
+    return {"text_lines": [], "frame_paths": []}
+
+
 def load_transcript(transcript_path: str) -> dict:
     """
     Load transcript from JSON file and organize into chunks.
@@ -25,7 +30,7 @@ def load_transcript(transcript_path: str) -> dict:
 
         bucket_index = math.floor(start_time / CHUNK_SIZE_SEC)
         if bucket_index not in chunks:
-            chunks[bucket_index] = {"text_lines": [], "frame_paths": []}
+            chunks[bucket_index] = _new_chunk()
 
         chunks[bucket_index]["text_lines"].append(text)
 

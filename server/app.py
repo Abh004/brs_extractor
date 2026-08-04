@@ -7,7 +7,6 @@ and streams progress via WebSocket.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 
 from dotenv import load_dotenv
@@ -15,11 +14,11 @@ from dotenv import load_dotenv
 load_dotenv()
 import queue
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
+from config import CONFIG_FILE, DOCX_FILE, OUTPUT_FILE, TRANSCRIPT_PATH, VIDEO_PATH
 from server.job_manager import JobStatus, manager
 
 
@@ -48,11 +47,6 @@ async def index():
 # ── API endpoints ─────────────────────────────────────────────────────────────
 
 
-class RunRequest(BaseModel):
-    video_id: str | None = None
-    backend: str | None = None
-
-
 @app.post("/api/run")
 async def run_pipeline(
     video_id: str | None = Form(None),
@@ -63,10 +57,10 @@ async def run_pipeline(
     if manager.is_busy:
         raise HTTPException(409, "A pipeline job is already running. Wait for it to finish or cancel it.")
 
-    os.makedirs("input", exist_ok=True)
+    os.makedirs(os.path.dirname(VIDEO_PATH) or ".", exist_ok=True)
 
-    video_path = "input/video.mp4"
-    transcript_path = "input/transcript.json"
+    video_path = VIDEO_PATH
+    transcript_path = TRANSCRIPT_PATH
 
     if video_file and video_file.filename:
         with open(video_path, "wb") as f:
@@ -127,10 +121,14 @@ async def list_jobs():
 
 @app.get("/api/download/{filename:path}")
 async def download_file(filename: str):
-    allowed = {"extracted_requirements.json", "BRS.docx", "project_config.json"}
+    allowed = {
+        os.path.basename(OUTPUT_FILE),
+        os.path.basename(DOCX_FILE),
+        os.path.basename(CONFIG_FILE),
+    }
     if filename not in allowed:
         raise HTTPException(403, "File not available for download")
-    filepath = os.path.join("output", filename)
+    filepath = os.path.join(os.path.dirname(OUTPUT_FILE), filename)
     if not os.path.exists(filepath):
         raise HTTPException(404, f"{filename} not found — pipeline may not have completed")
     media_type = (
@@ -173,17 +171,7 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"type": "ping"})
                 continue
 
-            payload = {
-                "type": "update",
-                "stage": update.stage,
-                "stage_name": update.stage_name,
-                "status": update.status,
-                "message": update.message,
-                "progress": update.progress,
-                "elapsed": round(update.elapsed, 1),
-                "log": update.log.split("\n")[-50:],
-            }
-            await websocket.send_json(payload)
+            await websocket.send_json(update.to_payload())
 
             if update.stage == 0 and update.status in ("done", "error", "cancelled"):
                 break

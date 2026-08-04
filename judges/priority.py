@@ -9,7 +9,7 @@ Batched (not per-bullet) to keep this cheap — one LLM call per ~15 bullets.
 
 from __future__ import annotations
 
-from config import DEDUP_MODEL
+from config import DEDUP_MODEL, PRIORITY_BATCH_SIZE, PRIORITY_MAX_TOKENS
 from utils import extract_balanced_json
 
 _VALID = {"M", "S", "C"}
@@ -35,7 +35,7 @@ order."""
 def classify_priorities(
     bullets: list[str],
     backend,
-    batch_size: int = 15,
+    batch_size: int = PRIORITY_BATCH_SIZE,
     handle=None,
 ) -> list[str]:
     """
@@ -48,25 +48,21 @@ def classify_priorities(
         bullets:    Flat list of requirement bullet strings to classify.
         backend:    InferenceBackend instance.
         batch_size: Bullets per LLM call.
-        handle:     Optional pre-loaded handle for JUDGE3_MODEL. If given,
+        handle:     Optional pre-loaded handle for DEDUP_MODEL. If given,
                     this function uses it as-is and does NOT load or unload
-                    it — the caller owns that lifecycle (e.g. main.py sharing
-                    one handle across priority classification AND config
-                    generation, both of which use JUDGE3_MODEL, to avoid
-                    loading the same model twice back-to-back). If None
-                    (default), the previous self-contained behavior is
-                    preserved: this function loads JUDGE3_MODEL itself and
-                    unloads it before returning.
+                    it — the caller owns that lifecycle (e.g. the pipeline
+                    sharing one handle across priority classification AND
+                    config generation, both of which use DEDUP_MODEL, to
+                    avoid loading the same model twice back-to-back). If None
+                    (default), DEDUP_MODEL is loaded and unloaded via
+                    backend.llm_context() for the duration of the call.
     """
     if not bullets:
         return []
 
-    owns_handle = handle is None
-    if owns_handle:
-        handle = backend.load_llm(DEDUP_MODEL)
-
     out: list[str] = []
-    try:
+
+    def _classify(handle):
         for i in range(0, len(bullets), batch_size):
             batch = bullets[i : i + batch_size]
             numbered = "\n".join(f"{n}. {b}" for n, b in enumerate(batch))
@@ -74,7 +70,7 @@ def classify_priorities(
                 handle=handle,
                 system_prompt=_PRIORITY_SYSTEM,
                 user_prompt=numbered,
-                max_tokens=120,
+                max_tokens=PRIORITY_MAX_TOKENS,
             )
             parsed_obj = extract_balanced_json(raw)
             parsed = parsed_obj.get("priorities", []) if parsed_obj else []
@@ -90,8 +86,11 @@ def classify_priorities(
                 parsed = parsed[: len(batch)]
 
             out.extend(parsed)
-    finally:
-        if owns_handle:
-            backend.unload_llm(handle)
+
+    if handle is None:
+        with backend.llm_context(DEDUP_MODEL) as handle:
+            _classify(handle)
+    else:
+        _classify(handle)
 
     return out

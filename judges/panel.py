@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from backend import InferenceBackend, get_backend
-from config import JUDGE_MODEL, JUDGE_SYSTEM
+from config import JUDGE_MAX_BULLETS, JUDGE_MAX_TOKENS, JUDGE_MODEL, JUDGE_SYSTEM
 from judges.dedup import (
     extract_bullets,
     filter_meta_bullets,
@@ -9,11 +9,8 @@ from judges.dedup import (
     filter_truncated_bullets,
 )
 
-_JUDGE_MAX_TOKENS = 150
-_MAX_BULLETS = 5
 
-
-def _validate_bullets(text: str, max_bullets: int = _MAX_BULLETS) -> str:
+def _validate_bullets(text: str, max_bullets: int = JUDGE_MAX_BULLETS) -> str:
     bullets = extract_bullets(text)
     bullets = filter_meta_bullets(bullets)
     bullets = filter_truncated_bullets(bullets)
@@ -66,6 +63,6 @@ class JudgesPanel:
             handle=self._handle,
             system_prompt=JUDGE_SYSTEM,
             user_prompt=vlm_output,
-            max_tokens=_JUDGE_MAX_TOKENS,
+            max_tokens=JUDGE_MAX_TOKENS,
         )
         return _validate_bullets(raw)

@@ -14,8 +14,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
 
+from config import OUTPUT_FILE
 from server.pipeline_runner import PipelineRunner, StageUpdate
 
 
@@ -178,18 +178,13 @@ class JobManager:
         import json
         import os
 
-        output_file = f"output/extracted_requirements.json"
-        if not os.path.exists(output_file):
+        if not os.path.exists(OUTPUT_FILE):
             return None
         try:
-            with open(output_file, "r", encoding="utf-8") as f:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
             return None
-
-    async def has_config(self) -> bool:
-        import os
-        return os.path.exists("output/project_config.json")
 
 
 manager = JobManager()

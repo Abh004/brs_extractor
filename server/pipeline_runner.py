@@ -28,15 +28,22 @@ from typing import Callable
 
 from backend import check_hf_reachable, get_backend, print_hf_unreachable_warning
 from config import (
+    CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
+    CONFIG_FILE,
     DEDUP_MODEL,
+    DOCX_FILE,
     OUTPUT_FILE,
 )
 from config_generator import generate_config
 from data_prep import get_valid_chunks, prepare_data
 from extractor import fetch_transcript
 from judges import JudgesPanel
-from judges.dedup import dedup_cross_block, extract_bullets
+from judges.dedup import (
+    dedup_bullets_llm,
+    dedup_cross_block,
+    extract_bullets,
+)
 from judges.priority import classify_priorities
 from models import VLMProposer
 from utils import flag_unknown_words
@@ -59,13 +66,22 @@ class StageUpdate:
     log: str = ""
     details: dict = field(default_factory=dict)
 
+    def to_payload(self) -> dict:
+        """Dict form consumed by the WebSocket / job status endpoints."""
+        return {
+            "type": "update",
+            "stage": self.stage,
+            "stage_name": self.stage_name,
+            "status": self.status,
+            "message": self.message,
+            "progress": self.progress,
+            "elapsed": round(self.elapsed, 1),
+            "log": self.log.split("\n")[-50:],
+        }
+
 
 Callback = Callable[[StageUpdate], None]
 
-
-_CHECKPOINT_FILE = os.path.splitext(OUTPUT_FILE)[0] + "_checkpoint.jsonl"
-_CONFIG_FILE = "output/project_config.json"
-_DOCX_FILE = "output/BRS.docx"
 
 _VLM_MAX_RETRIES = 2
 _JUDGE_MAX_RETRIES = 2
@@ -143,10 +159,10 @@ class PipelineRunner:
         self._output_dir = output_dir
         self._keyframe_dir = keyframe_dir
 
-        self._checkpoint_file = os.path.join(output_dir, "extracted_requirements_checkpoint.jsonl")
-        self._config_file = os.path.join(output_dir, "project_config.json")
-        self._docx_file = os.path.join(output_dir, "BRS.docx")
-        self._output_file = os.path.join(output_dir, "extracted_requirements.json")
+        self._checkpoint_file = os.path.join(output_dir, os.path.basename(CHECKPOINT_FILE))
+        self._config_file = os.path.join(output_dir, os.path.basename(CONFIG_FILE))
+        self._docx_file = os.path.join(output_dir, os.path.basename(DOCX_FILE))
+        self._output_file = os.path.join(output_dir, os.path.basename(OUTPUT_FILE))
 
         self._cancel_requested = False
         self._log_lines: list[str] = []
@@ -210,7 +226,7 @@ class PipelineRunner:
 
         if self._video_id:
             if not os.path.exists(self._transcript_path) or os.path.getsize(self._transcript_path) == 0:
-                fetch_transcript()
+                fetch_transcript(video_id=self._video_id)
         else:
             if not os.path.exists(self._transcript_path):
                 raise FileNotFoundError(
@@ -433,13 +449,12 @@ class PipelineRunner:
                                     f"Pipeline finished in {total:.1f}s",
                                     1.0, elapsed=total))
 
-    def _flatten_and_assemble(
-        self, refined: list, priorities: list[str] | None = None,
-    ) -> tuple[list[dict], list[list[str]], list[str]]:
+    def _extract_bullets(
+        self, refined: list,
+    ) -> tuple[list[list[str]], list[str]]:
+        """Extract + spell-flag bullets per block. Returns (per_block, all_bullets)."""
         per_block: list[list[str]] = []
         all_bullets: list[str] = []
-        cursor = 0
-        blocks: list[dict] = []
         for req in refined:
             bullets = (
                 extract_bullets(req["refined_requirements"])
@@ -449,6 +464,18 @@ class PipelineRunner:
             bullets = [flag_unknown_words(b) for b in bullets]
             per_block.append(bullets)
             all_bullets.extend(bullets)
+        return per_block, all_bullets
+
+    def _assemble_blocks(
+        self,
+        refined: list,
+        per_block: list[list[str]],
+        priorities: list[str] | None = None,
+    ) -> list[dict]:
+        """Build output block dicts from pre-extracted per-block bullets."""
+        blocks: list[dict] = []
+        cursor = 0
+        for req, bullets in zip(refined, per_block):
             if priorities is not None:
                 slice_ = priorities[cursor:cursor + len(bullets)]
                 cursor += len(bullets)
@@ -463,15 +490,16 @@ class PipelineRunner:
                 "bullets": bullet_payload,
                 "error": req.get("error"),
             })
-        return blocks, per_block, all_bullets
+        return blocks
 
     def _dump_json(
         self, refined: list, inference_elapsed: float,
         judges_elapsed: float, dedup_removed: int = 0,
         priorities: list[str] | None = None,
-        return_bullets: bool = False,
-    ) -> list[str] | None:
-        blocks, _, all_bullets = self._flatten_and_assemble(refined, priorities=priorities)
+        extracted: tuple[list[list[str]], list[str]] | None = None,
+    ) -> list[str]:
+        per_block, all_bullets = extracted or self._extract_bullets(refined)
+        blocks = self._assemble_blocks(refined, per_block, priorities)
         os.makedirs(os.path.dirname(self._output_file), exist_ok=True)
         total = inference_elapsed + judges_elapsed
         successful = sum(1 for r in refined if r.get("refined_requirements"))
@@ -488,9 +516,33 @@ class PipelineRunner:
         }
         with open(self._output_file, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
-        if return_bullets:
-            return all_bullets
-        return None
+        return all_bullets
+
+    def _dedup_within_blocks(self, refined: list, backend, llm_handle) -> list:
+        """Deduplicate semantically-equivalent bullets within each time block.
+
+        The judge panel already applies a substring filter per chunk; this adds
+        an embedding+LLM pass so near-duplicate wording in the SAME block is
+        collapsed too (cross-block dedup only compares across blocks). Returns a
+        new list — never mutates the input.
+        """
+        updated: list[dict] = []
+        for req in refined:
+            text = req.get("refined_requirements")
+            if not text:
+                updated.append(req)
+                continue
+            bullets = extract_bullets(text)
+            if not bullets:
+                updated.append(req)
+                continue
+            deduped = dedup_bullets_llm(bullets, backend, llm_handle)
+            new_req = dict(req)
+            new_req["refined_requirements"] = (
+                "\n".join(f"- {b}" for b in deduped) if deduped else None
+            )
+            updated.append(new_req)
+        return updated
 
     def _run_post_processing(
         self, refined: list, backend, judges_elapsed: float,
@@ -500,7 +552,7 @@ class PipelineRunner:
         all_bullets: list[str] = []
 
         self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                   "Loading judge3...", 0.0))
+                                   "Loading DEDUP_MODEL...", 0.0))
         self._check_cancelled()
 
         judge3_handle = None
@@ -512,12 +564,19 @@ class PipelineRunner:
         if judge3_handle is not None:
             try:
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
+                                            "Within-block deduplication...", 0.05))
+                refined = self._dedup_within_blocks(
+                    refined, backend, judge3_handle
+                )
+
+                self._emit(cb, StageUpdate(5, "Post-processing", "running",
                                             "Cross-block deduplication...", 0.1))
                 refined, dedup_removed = dedup_cross_block(
                     refined, backend=backend, llm_handle=judge3_handle
                 )
 
-                _, _, all_bullets = self._flatten_and_assemble(refined)
+                extracted = self._extract_bullets(refined)
+                all_bullets = extracted[1]
 
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
                                             f"Classifying {len(all_bullets)} priorities...", 0.4))
@@ -529,7 +588,8 @@ class PipelineRunner:
                     priorities = ["S"] * len(all_bullets)
 
                 self._dump_json(refined, inference_elapsed, judges_elapsed,
-                                dedup_removed, priorities=priorities)
+                                dedup_removed, priorities=priorities,
+                                extracted=extracted)
 
                 # Stage 6
                 self._emit(cb, StageUpdate(6, "Config Generation", "running",
@@ -551,7 +611,7 @@ class PipelineRunner:
                 backend.unload_llm(judge3_handle)
         else:
             all_bullets = self._dump_json(
-                refined, inference_elapsed, judges_elapsed, return_bullets=True,
+                refined, inference_elapsed, judges_elapsed,
             )
 
         self._emit(cb, StageUpdate(5, "Post-processing", "done",

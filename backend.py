@@ -18,9 +18,58 @@ from __future__ import annotations
 import os
 import platform
 from abc import ABC, abstractmethod
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
+from config import ALL_MODELS
 from utils import clean_output, is_truncated_think, strip_think_blocks
+
+
+def _result_text(result) -> str:
+    """Extract the text from a generation result object or plain string."""
+    return str(result.text) if hasattr(result, "text") else str(result)
+
+
+def _finalize_vlm_output(raw: str) -> str:
+    """
+    Post-process a VLM generation: drop truncated think blocks (return "")
+    and strip any complete <think>…</think> blocks from the rest.
+    """
+    if is_truncated_think(raw):
+        return ""
+    return strip_think_blocks(raw)
+
+
+def _finalize_llm_output(raw: str) -> str:
+    """
+    Post-process a text-LLM generation: drop truncated think blocks (return
+    "") and run the full clean_output pass on the rest.
+    """
+    if is_truncated_think(raw):
+        return ""
+    return clean_output(raw)
+
+
+def _apply_chat_template(processor, messages, **kwargs) -> Any:
+    """
+    Apply a chat template, disabling Qwen3 thinking. Newer transformers
+    expect the flag inside processor_kwargs; older versions accept it as a
+    top-level kwarg — try the new form first and fall back on TypeError.
+    """
+    try:
+        return processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            processor_kwargs={"enable_thinking": False},
+            **kwargs,
+        )
+    except TypeError:
+        return processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            enable_thinking=False,
+            **kwargs,
+        )
 
 
 # ── abstract base ─────────────────────────────────────────────────────────────
@@ -77,6 +126,19 @@ class InferenceBackend(ABC):
     def unload_llm(self, handle: Any) -> None:
         """Free an LLM handle returned by load_llm."""
 
+    @contextmanager
+    def llm_context(self, model_id: str) -> Iterator[Any]:
+        """
+        Load an LLM, yield its handle for the duration of the block, then
+        unload it. Guarantees the handle is freed even if the body raises —
+        preventing a leaked model from blocking later runs.
+        """
+        handle = self.load_llm(model_id)
+        try:
+            yield handle
+        finally:
+            self.unload_llm(handle)
+
     def clear_cache(self) -> None:
         """Optional: flush any accelerator memory caches (MLX Metal cache etc.)."""
 
@@ -89,11 +151,8 @@ class MLXBackend(InferenceBackend):
     be called from the main thread — do not wrap calls in ThreadPoolExecutor.
     """
 
-    _NO_THINK_MODELS = {
-        "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
-        "lmstudio-community/Qwen3.5-9B-MLX-4bit",
-        "mlx-community/Qwen3-1.7B-4bit",
-    }
+    _NO_THINK_MODELS = {m.mlx_id for m in ALL_MODELS if m.no_think}
+    _VLM_BACKED_TEXT_MODELS = {m.mlx_id for m in ALL_MODELS if m.vlm_backed}
 
     def __init__(self) -> None:
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -180,10 +239,7 @@ class MLXBackend(InferenceBackend):
             raise
 
         mx.clear_cache()
-        raw = str(result.text) if hasattr(result, "text") else str(result)
-        if is_truncated_think(raw):
-            return ""
-        return strip_think_blocks(raw)
+        return _finalize_vlm_output(_result_text(result))
 
     def unload_vlm(self) -> None:
         import mlx.core as mx
@@ -264,10 +320,7 @@ class MLXBackend(InferenceBackend):
                 repetition_context_size=repetition_context_size,
                 verbose=False,
             )
-            raw = str(result.text) if hasattr(result, "text") else str(result)
-            if is_truncated_think(raw):
-                return ""
-            return clean_output(raw)
+            return _finalize_llm_output(_result_text(result))
 
         # existing mlx_lm path, unchanged
         from mlx_lm import generate
@@ -297,9 +350,7 @@ class MLXBackend(InferenceBackend):
             logits_processors=logits_processors,
             verbose=False,
         )
-        if is_truncated_think(raw):
-            return ""
-        return clean_output(raw)
+        return _finalize_llm_output(raw)
 
     def unload_llm(self, handle: dict) -> None:
         import mlx.core as mx
@@ -317,14 +368,6 @@ class MLXBackend(InferenceBackend):
         import mlx.core as mx
 
         mx.clear_cache()
-
-    # Model IDs that are natively unified VLM architectures (Qwen3.5, etc.)
-    # but used here purely for text — routed through mlx_vlm with
-    # num_images=0 rather than mlx_lm, since these models don't load via
-    # mlx_lm's API.
-    _VLM_BACKED_TEXT_MODELS = {
-        "lmstudio-community/Qwen3.5-9B-MLX-4bit",
-    }
 
 
 def _attn_kwargs() -> dict:
@@ -482,24 +525,13 @@ class HFBackend(InferenceBackend):
             messages[0]["content"].append({"type": "image", "image": img})
         messages[0]["content"].append({"type": "text", "text": prompt_text})
 
-        try:
-            inputs = self._vlm_processor.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-                processor_kwargs={"enable_thinking": False},
-            ).to(self._vlm_model.device)
-        except TypeError:
-            inputs = self._vlm_processor.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                enable_thinking = False,
-                return_tensors="pt",
-            ).to(self._vlm_model.device)
+        inputs = _apply_chat_template(
+            self._vlm_processor,
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self._vlm_model.device)
 
         gen_kwargs: dict = {"max_new_tokens": max_tokens}
         if temperature > 0:
@@ -514,9 +546,7 @@ class HFBackend(InferenceBackend):
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = self._vlm_processor.decode(new_ids, skip_special_tokens=True)
 
-        if is_truncated_think(raw):
-            return ""
-        return strip_think_blocks(raw)
+        return _finalize_vlm_output(raw)
 
     def unload_vlm(self) -> None:
         import gc
@@ -565,17 +595,7 @@ class HFBackend(InferenceBackend):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        try:
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=False,
-                processor_kwargs={"enable_thinking": False},
-            )
-        except TypeError:
-            prompt = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, enable_thinking=False,
-            )
+        prompt = _apply_chat_template(tokenizer, messages, tokenize=False)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         gen_kwargs: dict = {
@@ -590,9 +610,7 @@ class HFBackend(InferenceBackend):
             output_ids = model.generate(**inputs, **gen_kwargs)
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = tokenizer.decode(new_ids, skip_special_tokens=True)
-        if is_truncated_think(raw):
-            return ""
-        return clean_output(raw)
+        return _finalize_llm_output(raw)
 
     def unload_llm(self, handle: dict) -> None:
         import gc
@@ -617,12 +635,9 @@ class HFBackend(InferenceBackend):
         self._try_cuda_empty_cache()
 
 
-# Maps mlx-community quantised model IDs → canonical HuggingFace repo IDs.
-_MLX_TO_HF: dict[str, str] = {
-    "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Qwen/Qwen3-VL-8B-Instruct",
-    "lmstudio-community/Qwen3.5-9B-MLX-4bit": "Qwen/Qwen3.5-9B",
-    "mlx-community/Qwen3-1.7B-4bit": "Qwen/Qwen3-1.7B",
-}
+# Maps MLX model IDs → canonical HuggingFace repo IDs. Derived from the
+# config.py registry so model names live in exactly one place.
+_MLX_TO_HF: dict[str, str] = {m.mlx_id: m.hf_id for m in ALL_MODELS}
 
 
 def _mlx_to_hf(model_id: str) -> str:

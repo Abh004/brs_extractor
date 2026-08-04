@@ -14,8 +14,8 @@ import json
 import os
 
 from backend import InferenceBackend, get_backend
-from config import JUDGE_MODEL
-from utils import clean_output, extract_balanced_json, strip_think_blocks
+from config import CONFIG_MAX_TOKENS, DEDUP_MODEL
+from utils import clean_output, extract_balanced_json
 
 _SYSTEM_PROMPT = """\
 You are a senior business analyst. Given a list of software requirements \
@@ -107,15 +107,14 @@ def generate_config(
         config_path: Path to write project_config.json.
         backend:     InferenceBackend to use. If None, one is created via
                      get_backend() (reads BACKEND env var).
-        handle:      Optional pre-loaded handle for JUDGE3_MODEL. If given,
+        handle:      Optional pre-loaded handle for DEDUP_MODEL. If given,
                      this function uses it as-is and does NOT load or unload
-                     it — the caller owns that lifecycle (e.g. main.py
+                     it — the caller owns that lifecycle (e.g. the pipeline
                      sharing one handle across priority classification and
-                     config generation, both of which use JUDGE3_MODEL, to
+                     config generation, both of which use DEDUP_MODEL, to
                      avoid loading the same model twice back-to-back). If
-                     None (default), the previous self-contained behavior is
-                     preserved: this function loads JUDGE3_MODEL itself and
-                     unloads it before returning.
+                     None (default), DEDUP_MODEL is loaded and unloaded via
+                     backend.llm_context() for the duration of the call.
 
     Returns:
         The parsed config dict (also written to config_path).
@@ -124,24 +123,26 @@ def generate_config(
 
     print(f"\n[STAGE 6] Generating BRS config from {len(all_bullets)} requirements...")
 
-    owns_handle = handle is None
-    if owns_handle:
-        handle = _backend.load_llm(JUDGE_MODEL)
-
     bullet_summary = _build_bullet_summary(all_bullets)
     user_content = _USER_TEMPLATE.format(bullets=bullet_summary)
 
     print("  Inferring document structure...")
-    raw = _backend.generate_llm(
-        handle=handle,
-        system_prompt=_SYSTEM_PROMPT,
-        user_prompt=user_content,
-        max_tokens=1200,
-    )
-
-    if owns_handle:
-        _backend.unload_llm(handle)
+    if handle is None:
+        with _backend.llm_context(DEDUP_MODEL) as handle:
+            raw = _backend.generate_llm(
+                handle=handle,
+                system_prompt=_SYSTEM_PROMPT,
+                user_prompt=user_content,
+                max_tokens=CONFIG_MAX_TOKENS,
+            )
         print("  Config model unloaded.")
+    else:
+        raw = _backend.generate_llm(
+            handle=handle,
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_content,
+            max_tokens=CONFIG_MAX_TOKENS,
+        )
 
     cfg = _parse_config_response(raw)
     if cfg is None:

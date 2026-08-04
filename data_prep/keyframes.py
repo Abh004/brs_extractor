@@ -11,6 +11,8 @@ from config import (
     VIDEO_ID,
 )
 
+from .transcript import _new_chunk
+
 _CACHE_MARKER = os.path.join(os.path.dirname(__file__), ".video_id")
 
 
@@ -29,7 +31,7 @@ def _load_cached_frames(frame_dir: str, chunks: dict) -> dict:
 
         frame_filename = os.path.join(frame_dir, fname)
         if bucket_index not in chunks:
-            chunks[bucket_index] = {"text_lines": [], "frame_paths": []}
+            chunks[bucket_index] = _new_chunk()
         chunks[bucket_index]["frame_paths"].append(frame_filename)
     return chunks
 
@@ -107,7 +109,7 @@ def extract_keyframes(video_path: str, chunks: dict, frame_dir: str) -> dict:
                         f"  Note: bucket {bucket_index} has frames but no transcript text "
                         f"(t={current_time_sec:.1f}s)."
                     )
-                    chunks[bucket_index] = {"text_lines": [], "frame_paths": []}
+                    chunks[bucket_index] = _new_chunk()
 
                 chunks[bucket_index]["frame_paths"].append(frame_filename)
 

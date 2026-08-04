@@ -20,7 +20,7 @@ import re
 import numpy as np
 
 from utils import extract_balanced_json, normalize_embeddings
-from config import ENCODER_MODEL
+from config import DEDUP_MAX_TOKENS, ENCODER_MODEL
 
 _model = None  # lazy-loaded on first use
 
@@ -44,11 +44,30 @@ _TRUNCATION_ENDINGS = re.compile(
     re.IGNORECASE,
 )
 
-# Embedding prefilter threshold — deliberately LOW (high recall, low precision). Its only job is "could these plausibly be duplicates?" so we don't burn an LLM call on every single pair.
-CANDIDATE_THRESHOLD = 0.35
+# Embedding prefilter threshold — deliberately LOW (high recall, low precision). Its only job is "could these plausibly be duplicates?" so we don't burn an LLM call on every single pair. Applies to embeddings computed AFTER _embedding_text strips the shared "The system shall" boilerplate, so it measures content similarity, not prefix overlap.
+CANDIDATE_THRESHOLD = 0.40
 
 # Cosine similarity above which two bullets are treated as obvious duplicates without spending an LLM call — the complement to CANDIDATE_THRESHOLD above.
-AUTO_ACCEPT_THRESHOLD = 0.85
+AUTO_ACCEPT_THRESHOLD = 0.80
+
+# Maximum number of pool bullets a candidate is adjudicated against in one LLM call (cross-block). Caps each cluster at NEIGHBOR_TOPK + 1 bullets; larger clusters cause the small adjudicator to miscount indices.
+NEIGHBOR_TOPK = 3
+
+_BOILERPLATE_PREFIX = re.compile(
+    r"^\s*(?:the\s+)?system\s+(?:shall|will|must|can|should)\b\s*",
+    re.IGNORECASE,
+)
+
+
+def _embedding_text(text: str) -> str:
+    """Return `text` with leading requirement boilerplate ("The system shall …") removed.
+
+    Every refined bullet carries the same "The system shall …" prefix, which
+    inflates cosine similarity between otherwise unrelated bullets. Stripping it
+    before embedding makes similarity reflect actual content; the LLM
+    adjudicator still sees the full text.
+    """
+    return _BOILERPLATE_PREFIX.sub("", text).strip()
 
 def _jaccard_similarity(a: str, b: str) -> float:
     """Jaccard similarity over word tokens — used as fallback when the embedding model is unavailable."""
@@ -229,7 +248,11 @@ def cluster_candidates(
     embeddings: np.ndarray
 
     if model is not None:
-        embeddings = model.encode(bullets, convert_to_numpy=True, show_progress_bar=False)
+        embeddings = model.encode(
+            [_embedding_text(b) for b in bullets],
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
         sim = _cosine_matrix(embeddings)
     else:
         print("  [dedup] Using Jaccard-based candidate clustering (no embedding model).")
@@ -303,7 +326,7 @@ def llm_resolve_clusters(
     clusters: list[list[int]],
     backend,
     llm_handle,
-    max_tokens: int = 500,
+    max_tokens: int = DEDUP_MAX_TOKENS,
     embeddings: np.ndarray | None = None,
     auto_accept_threshold: float = AUTO_ACCEPT_THRESHOLD,
 ) -> list[str]:
@@ -341,6 +364,14 @@ def llm_resolve_clusters(
             for pair in auto_pairs:
                 canonical = _pick_canonical(bullets, pair)
                 output.append((min(pair), canonical))
+            if auto_pairs:
+                print(
+                    f"  [dedup] auto-accept merged {len(auto_pairs)} group(s) "
+                    f"(cosine >= {auto_accept_threshold}): "
+                    + "; ".join(
+                        f"[{', '.join(str(bullets[i])[:40] for i in p)}]" for p in auto_pairs
+                    )
+                )
             if not remaining:
                 continue
             if len(remaining) == 1:
@@ -387,6 +418,22 @@ def llm_resolve_clusters(
             for local_idx in missing_local:
                 global_idx = cluster[local_idx]
                 output.append((global_idx, bullets[global_idx]))
+
+            display_groups = []
+            for sub in sub_clusters:
+                valid = [
+                    x
+                    for x in sub
+                    if isinstance(x, (int, float, str)) and 0 <= int(x) < len(cluster)
+                ]
+                display_groups.append(
+                    f"[{', '.join(str(bullets[cluster[int(x)]])[:40] for x in valid)}]"
+                )
+            print(
+                f"  [dedup] adjudicated [{len(cluster)} bullets] -> "
+                f"{len(sub_clusters)} group(s), {len(missing_local)} passed through: "
+                + "; ".join(display_groups)
+            )
 
         except Exception as exc:
             preview = (raw or "")[:200].replace("\n", " ")
@@ -475,7 +522,9 @@ def dedup_cross_block(
 
         # Bullets arriving here have already been through filter_substrings inside merge_judge_outputs, so we skip repeating that step.
         chunk_embeddings = model.encode(
-            bullets, convert_to_numpy=True, show_progress_bar=False
+            [_embedding_text(b) for b in bullets],
+            convert_to_numpy=True,
+            show_progress_bar=False,
         )
 
         kept_bullets: list[str] = []
@@ -491,6 +540,7 @@ def dedup_cross_block(
                 continue
 
             nearby_idx = [i for i, s in enumerate(sims) if s >= candidate_threshold]
+            nearby_idx = sorted(nearby_idx, key=lambda i: -sims[i])[:NEIGHBOR_TOPK]
 
             if not nearby_idx:
                 kept_bullets.append(bullet)
@@ -519,8 +569,18 @@ def dedup_cross_block(
 
                 if merged_away and not is_new_bullet_represented_alone:
                     total_removed += 1
+                    print(
+                        f"  [dedup] DROPPED (cross-block, max_sim={max_sim:.2f} "
+                        f"vs {len(nearby_idx)} pool bullet(s)): {bullet[:80]!r}"
+                    )
                     continue
                 else:
+                    print(
+                        f"  [dedup] KEPT (cross-block, max_sim={max_sim:.2f} "
+                        f"vs {len(nearby_idx)} pool bullet(s), "
+                        f"{len(local_bullets) - len(resolved)} merged_away): "
+                        f"{bullet[:80]!r}"
+                    )
                     kept_bullets.append(bullet)
                     kept_embeddings.append(emb)
             except Exception as exc:  # noqa: BLE001 — fail safe, keep bullet
