@@ -331,11 +331,12 @@ class PipelineRunner:
 
                 t = time.time()
                 try:
-                    response = _with_retry(
-                        fn=lambda fp=frame_paths, tx=combined_text: proposer.generate(fp, tx),
-                        max_retries=_VLM_MAX_RETRIES,
-                        label=label,
-                    )
+                    with backend.usage.stage("stage3_vlm"):
+                        response = _with_retry(
+                            fn=lambda fp=frame_paths, tx=combined_text: proposer.generate(fp, tx),
+                            max_retries=_VLM_MAX_RETRIES,
+                            label=label,
+                        )
                     elapsed = time.time() - t
                 except Exception as e:
                     elapsed = time.time() - t
@@ -392,11 +393,12 @@ class PipelineRunner:
             label = f"Judge eval chunk {req['minute_block'] + 1}"
             try:
                 raw_output = req["raw_model_output"]
-                output = _with_retry(
-                    fn=lambda ro=raw_output: judges_panel.evaluate(ro),
-                    max_retries=_JUDGE_MAX_RETRIES,
-                    label=label,
-                )
+                with backend.usage.stage("stage4_judge"):
+                    output = _with_retry(
+                        fn=lambda ro=raw_output: judges_panel.evaluate(ro),
+                        max_retries=_JUDGE_MAX_RETRIES,
+                        label=label,
+                    )
                 refined.append({
                     "minute_block": req["minute_block"],
                     "time_range": req["time_range"],
@@ -442,6 +444,9 @@ class PipelineRunner:
         self._emit(cb, StageUpdate(7, "DOCX Generation", "done",
                                     "BRS.docx generated",
                                     1.0, elapsed=time.time() - stage7_start))
+
+        # Token usage summary
+        backend.usage.to_console()
 
         # Done
         total = time.time() - stage1_start
@@ -497,21 +502,25 @@ class PipelineRunner:
         judges_elapsed: float, dedup_removed: int = 0,
         priorities: list[str] | None = None,
         extracted: tuple[list[list[str]], list[str]] | None = None,
+        token_usage: dict | None = None,
     ) -> list[str]:
         per_block, all_bullets = extracted or self._extract_bullets(refined)
         blocks = self._assemble_blocks(refined, per_block, priorities)
         os.makedirs(os.path.dirname(self._output_file), exist_ok=True)
         total = inference_elapsed + judges_elapsed
         successful = sum(1 for r in refined if r.get("refined_requirements"))
+        summary = {
+            "total_chunks": len(refined),
+            "successfully_refined": successful,
+            "duplicate_bullets_removed_cross_block": dedup_removed,
+            "inference_time_sec": round(inference_elapsed, 1),
+            "judges_time_sec": round(judges_elapsed, 1),
+            "total_time_sec": round(total, 1),
+        }
+        if token_usage:
+            summary["token_usage"] = token_usage
         output = {
-            "summary": {
-                "total_chunks": len(refined),
-                "successfully_refined": successful,
-                "duplicate_bullets_removed_cross_block": dedup_removed,
-                "inference_time_sec": round(inference_elapsed, 1),
-                "judges_time_sec": round(judges_elapsed, 1),
-                "total_time_sec": round(total, 1),
-            },
+            "summary": summary,
             "requirements": blocks,
         }
         with open(self._output_file, "w", encoding="utf-8") as f:
@@ -565,15 +574,17 @@ class PipelineRunner:
             try:
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
                                             "Within-block deduplication...", 0.05))
-                refined = self._dedup_within_blocks(
-                    refined, backend, judge3_handle
-                )
+                with backend.usage.stage("stage5_dedup"):
+                    refined = self._dedup_within_blocks(
+                        refined, backend, judge3_handle
+                    )
 
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
                                             "Cross-block deduplication...", 0.1))
-                refined, dedup_removed = dedup_cross_block(
-                    refined, backend=backend, llm_handle=judge3_handle
-                )
+                with backend.usage.stage("stage5_dedup"):
+                    refined, dedup_removed = dedup_cross_block(
+                        refined, backend=backend, llm_handle=judge3_handle
+                    )
 
                 extracted = self._extract_bullets(refined)
                 all_bullets = extracted[1]
@@ -581,25 +592,28 @@ class PipelineRunner:
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
                                             f"Classifying {len(all_bullets)} priorities...", 0.4))
                 try:
-                    priorities = classify_priorities(
-                        all_bullets, backend=backend, handle=judge3_handle
-                    )
+                    with backend.usage.stage("stage5_priority"):
+                        priorities = classify_priorities(
+                            all_bullets, backend=backend, handle=judge3_handle
+                        )
                 except Exception:
                     priorities = ["S"] * len(all_bullets)
 
                 self._dump_json(refined, inference_elapsed, judges_elapsed,
                                 dedup_removed, priorities=priorities,
-                                extracted=extracted)
+                                extracted=extracted,
+                                token_usage=backend.usage.summary())
 
                 # Stage 6
                 self._emit(cb, StageUpdate(6, "Config Generation", "running",
                                             "Inferring document structure...", 0.0))
                 stage6_start = time.time()
                 try:
-                    generate_config(
-                        all_bullets, self._config_file, backend=backend,
-                        handle=judge3_handle,
-                    )
+                    with backend.usage.stage("stage6_config"):
+                        generate_config(
+                            all_bullets, self._config_file, backend=backend,
+                            handle=judge3_handle,
+                        )
                     self._emit(cb, StageUpdate(6, "Config Generation", "done",
                                                 "Config generated",
                                                 1.0, elapsed=time.time() - stage6_start))
@@ -612,6 +626,7 @@ class PipelineRunner:
         else:
             all_bullets = self._dump_json(
                 refined, inference_elapsed, judges_elapsed,
+                token_usage=backend.usage.summary(),
             )
 
         self._emit(cb, StageUpdate(5, "Post-processing", "done",

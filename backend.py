@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from config import ALL_MODELS
+from usage import TokenTracker
 from utils import clean_output, is_truncated_think, strip_think_blocks
 
 
@@ -80,6 +81,9 @@ class InferenceBackend(ABC):
     Implementations must be safe to call from the main thread only — MLX GPU
     streams are thread-local and cannot be used from ThreadPoolExecutor workers.
     """
+
+    def __init__(self) -> None:
+        self.usage = TokenTracker()
 
     @abstractmethod
     def load_vlm(self, model_id: str) -> None:
@@ -156,6 +160,7 @@ class MLXBackend(InferenceBackend):
 
     def __init__(self) -> None:
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        self.usage = TokenTracker()
         self._vlm_model = None
         self._vlm_processor = None
         self._vlm_config = None
@@ -239,6 +244,11 @@ class MLXBackend(InferenceBackend):
             raise
 
         mx.clear_cache()
+        self.usage.add(
+            model_id=self._vlm_model_id or "vlm",
+            prompt_tokens=getattr(result, "prompt_tokens", 0),
+            completion_tokens=getattr(result, "generation_tokens", 0),
+        )
         return _finalize_vlm_output(_result_text(result))
 
     def unload_vlm(self) -> None:
@@ -320,10 +330,15 @@ class MLXBackend(InferenceBackend):
                 repetition_context_size=repetition_context_size,
                 verbose=False,
             )
+            self.usage.add(
+                model_id=handle.get("model_id", "llm"),
+                prompt_tokens=getattr(result, "prompt_tokens", 0),
+                completion_tokens=getattr(result, "generation_tokens", 0),
+            )
             return _finalize_llm_output(_result_text(result))
 
         # existing mlx_lm path, unchanged
-        from mlx_lm import generate
+        from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_logits_processors
 
         tokenizer = handle["tokenizer"]
@@ -342,13 +357,22 @@ class MLXBackend(InferenceBackend):
             repetition_penalty=repetition_penalty,
             repetition_context_size=repetition_context_size,
         )
-        raw = generate(
+        text_parts: list[str] = []
+        usage = None
+        for response in stream_generate(
             handle["model"],
             tokenizer,
             prompt=prompt,
             max_tokens=max_tokens,
             logits_processors=logits_processors,
-            verbose=False,
+        ):
+            text_parts.append(response.text)
+            usage = response
+        raw = "".join(text_parts)
+        self.usage.add(
+            model_id=handle.get("model_id", "llm"),
+            prompt_tokens=getattr(usage, "prompt_tokens", 0),
+            completion_tokens=getattr(usage, "generation_tokens", 0),
         )
         return _finalize_llm_output(raw)
 
@@ -444,6 +468,7 @@ class HFBackend(InferenceBackend):
     """
 
     def __init__(self) -> None:
+        self.usage = TokenTracker()
         self._vlm_model = None
         self._vlm_processor = None
         self._vlm_model_id: str | None = None
@@ -546,6 +571,12 @@ class HFBackend(InferenceBackend):
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = self._vlm_processor.decode(new_ids, skip_special_tokens=True)
 
+        self.usage.add(
+            model_id=self._vlm_model_id or "vlm",
+            prompt_tokens=int(inputs["input_ids"].shape[-1]),
+            completion_tokens=int(new_ids.shape[0]),
+        )
+
         return _finalize_vlm_output(raw)
 
     def unload_vlm(self) -> None:
@@ -610,6 +641,11 @@ class HFBackend(InferenceBackend):
             output_ids = model.generate(**inputs, **gen_kwargs)
         new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         raw = tokenizer.decode(new_ids, skip_special_tokens=True)
+        self.usage.add(
+            model_id=handle.get("model_id", "llm"),
+            prompt_tokens=int(inputs["input_ids"].shape[-1]),
+            completion_tokens=int(new_ids.shape[0]),
+        )
         return _finalize_llm_output(raw)
 
     def unload_llm(self, handle: dict) -> None:
