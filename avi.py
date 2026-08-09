@@ -20,8 +20,9 @@ If both are set, the subscription key takes precedence.
 
 HTTP uses the requests library (streaming upload + retry/backoff) so
 transient connection aborts from corporate proxies/firewalls (e.g. Windows
-WinError 10053) are retried instead of failing the run. Set AVI_NO_PROXY=1
-to bypass proxy env vars (HTTP(S)_PROXY / NO_PROXY) for these requests.
+WinError 10053) are retried instead of failing the run. Set AVI_NO_PROXY=1 to
+bypass proxy env vars (HTTP(S)_PROXY / NO_PROXY) and AVI_VERIFY_SSL=0 to skip
+TLS verification (GlobalProtect / corporate TLS interception) for these calls.
 """
 
 from __future__ import annotations
@@ -77,6 +78,23 @@ def _marker_matches(marker_path: str, video_path: str) -> bool:
 def _account_url(location: str, account_id: str) -> str:
     """Base URL for a Video Indexer account."""
     return f"https://api.videoindexer.ai/{location}/Accounts/{account_id}"
+
+
+def _verify() -> bool | str:
+    """Return the TLS verification setting for AVI requests.
+
+    Precedence:
+      - AVI_VERIFY_SSL=0  -> disable verification (for GlobalProtect /
+                            corporate TLS interception). Suppresses requests'
+                            insecure-request warning.
+      - otherwise default strict verification (True).
+    """
+    if os.getenv("AVI_VERIFY_SSL", "1").strip() == "0":
+        import warnings
+
+        warnings.simplefilter("ignore", requests.packages.urllib3.exceptions.InsecureRequestWarning)
+        return False
+    return True
 
 
 def _authed(headers: dict[str, str] | None = None) -> dict[str, str]:
@@ -143,6 +161,7 @@ def _request(
             headers=headers,
             data=body,
             timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
+            verify=_verify(),
         )
     except requests.exceptions.Timeout as e:
         raise RuntimeError(
@@ -220,6 +239,7 @@ def upload_and_index(
                     )
                 },
                 timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
+                verify=_verify(),
             )
     except requests.exceptions.RequestException as e:
         raise RuntimeError(
