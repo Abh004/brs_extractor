@@ -100,6 +100,13 @@ AVI_UPLOAD_NAME = "brs-pipeline-demo"
 AVI_INDEX_FILE = "avi_index.json"
 AVI_INDEX_TIMEOUT_SEC = 600  # max seconds to wait for AVI to finish indexing
 AVI_POLL_INTERVAL_SEC = 10
+# Transport resilience for the AVI HTTP client (retries on transient
+# connection/read failures — e.g. corporate proxies/firewalls that abort
+# mid-upload with WinError 10053).
+AVI_MAX_RETRIES = 3
+AVI_CONNECT_TIMEOUT = 30
+AVI_READ_TIMEOUT = 180
+AVI_RETRY_BACKOFF = 2.0
 
 # Env vars consumed by avi.py (loaded via python-dotenv):
 #   AZURE_VIDEO_INDEXER_LOCATION        e.g. "trial" or a region like "eastus"

@@ -11,11 +11,17 @@ pipeline entry points):
 
   AZURE_VIDEO_INDEXER_LOCATION          e.g. "eastus" (or "trial")
   AZURE_VIDEO_INDEXER_ACCOUNT_ID        AVI account GUID
+  AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY  long-lived API key (recommended)
   AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN     Contributor account access token
-  AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY  optional x-trialsubscriptionkey fallback
 
-All HTTP is done with the stdlib urllib so no third-party dependency is
-required for the cloud path.
+Provide ONE of the two credentials: either the long-lived subscription key
+(x-trialsubscriptionkey, recommended) or the short-lived (~1h) access token.
+If both are set, the subscription key takes precedence.
+
+HTTP uses the requests library (streaming upload + retry/backoff) so
+transient connection aborts from corporate proxies/firewalls (e.g. Windows
+WinError 10053) are retried instead of failing the run. Set AVI_NO_PROXY=1
+to bypass proxy env vars (HTTP(S)_PROXY / NO_PROXY) for these requests.
 """
 
 from __future__ import annotations
@@ -23,16 +29,21 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
+import requests
+from urllib3.util.retry import Retry
+
 from config import (
+    AVI_CONNECT_TIMEOUT,
     AVI_INDEX_FILE,
     AVI_INDEX_TIMEOUT_SEC,
     AVI_LANGUAGE,
+    AVI_MAX_RETRIES,
     AVI_POLL_INTERVAL_SEC,
+    AVI_READ_TIMEOUT,
+    AVI_RETRY_BACKOFF,
     AVI_UPLOAD_NAME,
 )
 
@@ -69,34 +80,94 @@ def _account_url(location: str, account_id: str) -> str:
 
 
 def _authed(headers: dict[str, str] | None = None) -> dict[str, str]:
-    """Build request headers, appending the Contributor access token."""
+    """Build request headers using whichever AVI credential is configured.
+
+    Auth is mutually exclusive: the long-lived subscription key
+    (x-trialsubscriptionkey) is preferred and used alone if set; otherwise the
+    Contributor account access token is sent as a bearer token. If neither is
+    set a clear error names the missing config.
+    """
     headers = dict(headers or {})
     headers.setdefault("Content-Type", "application/json")
-    headers.setdefault(
-        "Authorization", f"Bearer {_env('AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN')}"
-    )
-    # Optional fallback key (e.g. the account "x-trialsubscriptionkey") used by
-    # the video indexer API alongside bearer token auth.
     sub_key = os.getenv("AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY", "").strip()
+    token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "").strip()
     if sub_key:
         headers["x-trialsubscriptionkey"] = sub_key
+    elif token:
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        raise RuntimeError(
+            "No AVI credential set. Provide either "
+            "AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY (recommended) or "
+            "AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN."
+        )
     return headers
+
+
+def _session() -> requests.Session:
+    """Return a requests.Session with retry/backoff on transient failures.
+
+    Retries connect/read timeouts and the connection-reset class (proxy /
+    firewall aborts, e.g. Windows WinError 10053). Honors HTTP(S)_PROXY /
+    NO_PROXY from the environment by default; set AVI_NO_PROXY=1 to bypass
+    them for these calls.
+    """
+    retry = Retry(
+        total=AVI_MAX_RETRIES,
+        connect=AVI_MAX_RETRIES,
+        read=AVI_MAX_RETRIES,
+        status=0,  # don't auto-retry on HTTP status; we surface those clearly
+        backoff_factor=AVI_RETRY_BACKOFF,
+        raise_on_status=False,
+        status_forcelist=set(),
+        allowed_methods=frozenset({"GET", "POST"}),
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    if os.getenv("AVI_NO_PROXY", "").strip() == "1":
+        session.trust_env = False  # ignore HTTP(S)_PROXY / NO_PROXY
+        session.proxies = {}
+    return session
 
 
 def _request(
     method: str, url: str, headers: dict[str, str], body: bytes | None = None
 ) -> Any:
     """Perform an HTTP request and return the parsed JSON body."""
-    req = urllib.request.Request(url, method=method, headers=headers, data=body)
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")
-        raise RuntimeError(f"AVI HTTP {e.code} {method} {url} -> {detail}") from e
-    if not raw:
+        resp = _session().request(
+            method,
+            url,
+            headers=headers,
+            data=body,
+            timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
+        )
+    except requests.exceptions.Timeout as e:
+        raise RuntimeError(
+            "AVI request timed out / connection aborted. Check your "
+            "VPN/proxy/firewall, or set AVI_NO_PROXY=1 to bypass the proxy."
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            f"AVI network error during {method} {url}: {e}. Check your "
+            f"VPN/proxy/firewall, or set AVI_NO_PROXY=1 to bypass the proxy."
+        ) from e
+
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"AVI HTTP {resp.status_code}: check AVI credentials "
+            f"(AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY or "
+            f"AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN)."
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"AVI HTTP {resp.status_code} {method} {url} -> {resp.text[:500]}"
+        )
+    if not resp.text.strip():
         return None
-    return json.loads(raw)
+    return resp.json()
 
 
 def upload_and_index(
@@ -131,15 +202,35 @@ def upload_and_index(
         else:
             print("  [AVI] Source video changed; re-indexing (discarding stale cache).")
 
-    # Upload (multipart).
+    # Upload (streaming multipart via requests).
     name_enc = urllib.parse.quote(name)
     upload_url = f"{base}/Videos/{name_enc}?language={urllib.parse.quote(language)}"
     print(f"  [AVI] Uploading '{os.path.basename(video_path)}' as '{name}'...")
-    boundary = "----aviupload" + str(int(time.time() * 1000))
-    body, content_type = _multipart(video_path, boundary)
     upload_headers = _authed({})
-    upload_headers["Content-Type"] = content_type
-    result = _request("POST", upload_url, upload_headers, body)
+    try:
+        with open(video_path, "rb") as fobj:
+            resp = _session().post(
+                upload_url,
+                headers=upload_headers,
+                files={
+                    "file": (
+                        os.path.basename(video_path),
+                        fobj,
+                        "application/octet-stream",
+                    )
+                },
+                timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
+            )
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            f"AVI upload failed: {e}. Check your VPN/proxy/firewall, or "
+            f"set AVI_NO_PROXY=1 to bypass the proxy."
+        ) from e
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"AVI HTTP {resp.status_code} POST {upload_url} -> {resp.text[:500]}"
+        )
+    result = resp.json() if resp.text.strip() else None
     video_id = result.get("id") if isinstance(result, dict) else None
     if not video_id:
         raise RuntimeError(f"AVI upload returned no video ID: {result}")
@@ -173,19 +264,6 @@ def upload_and_index(
         f.write(_source_identity(video_path))
     print(f"  [AVI] index saved: {cache_path}")
     return state
-
-
-def _multipart(path: str, boundary: str) -> tuple[bytes, str]:
-    """Build a multipart file body and its Content-Type header value."""
-    with open(path, "rb") as f:
-        payload = f.read()
-    head = (
-        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
-        f"filename=\"{os.path.basename(path)}\"\r\n"
-        f"Content-Type: application/octet-stream\r\n\r\n"
-    ).encode()
-    tail = f"\r\n--{boundary}--\r\n".encode()
-    return head + payload + tail, f"multipart/form-data; boundary={boundary}"
 
 
 def _insights(index: dict) -> dict:
