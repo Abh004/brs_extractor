@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from backend import InferenceBackend, get_backend
-from config import JUDGE_MAX_BULLETS, JUDGE_MAX_TOKENS, JUDGE_MODEL, JUDGE_SYSTEM
+from config import (
+    AVI_JUDGE_MAX_BULLETS,
+    AVI_JUDGE_SYSTEM,
+    JUDGE_MAX_TOKENS,
+    JUDGE_MODEL,
+    JUDGE_SYSTEM,
+)
 from judges.dedup import (
     extract_bullets,
     filter_meta_bullets,
@@ -10,7 +16,7 @@ from judges.dedup import (
 )
 
 
-def _validate_bullets(text: str, max_bullets: int = JUDGE_MAX_BULLETS) -> str:
+def _validate_bullets(text: str, max_bullets: int = AVI_JUDGE_MAX_BULLETS) -> str:
     bullets = extract_bullets(text)
     bullets = filter_meta_bullets(bullets)
     bullets = filter_truncated_bullets(bullets)
@@ -20,11 +26,19 @@ def _validate_bullets(text: str, max_bullets: int = JUDGE_MAX_BULLETS) -> str:
 
 
 class JudgesPanel:
-    """Manages the single LLM judge that refines VLM proposer output."""
+    """Manages the single LLM judge that converts/refines proposer output."""
 
-    def __init__(self, backend: InferenceBackend | None = None) -> None:
+    def __init__(
+        self,
+        backend: InferenceBackend | None = None,
+        system_prompt: str = AVI_JUDGE_SYSTEM,
+    ) -> None:
+        # Default prompt now targets AVI proposer output (raw OCR + transcript).
+        # Pass system_prompt=JUDGE_SYSTEM explicitly to use the legacy
+        # refine-only prompt. JUDGE_SYSTEM is retained for that fallback path.
         self._backend = backend or get_backend()
         self._handle = None
+        self._system_prompt = system_prompt
 
     def preload(self) -> None:
         from huggingface_hub import snapshot_download
@@ -58,11 +72,11 @@ class JudgesPanel:
         self._backend.clear_cache()
         print("Judge unloaded.")
 
-    def evaluate(self, vlm_output: str) -> str:
+    def evaluate(self, raw_output: str) -> str:
         raw = self._backend.generate_llm(
             handle=self._handle,
-            system_prompt=JUDGE_SYSTEM,
-            user_prompt=vlm_output,
+            system_prompt=self._system_prompt,
+            user_prompt=raw_output,
             max_tokens=JUDGE_MAX_TOKENS,
         )
         return _validate_bullets(raw)

@@ -1,12 +1,13 @@
 """
-Models module — VLM proposer.
+Models module — AVI proposer (cloud, no local VLM).
 
-Delegates all inference to the shared InferenceBackend instance injected
-at construction time. No direct imports of mlx_vlm or transformers here.
+The proposer role is now filled by Azure Video Indexer: it assembles OCR
+screen-text + transcript per chunk, and the judge LLM converts that raw
+context into requirement bullets. No local GPU VLM is loaded.
 """
 
-from .proposer import VLMProposer
+from .avi_proposer import AVIProposer
 
 __all__ = [
-    "VLMProposer",
+    "AVIProposer",
 ]

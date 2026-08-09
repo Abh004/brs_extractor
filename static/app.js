@@ -25,24 +25,14 @@ async function startPipeline() {
 
   if (activeTab === 'upload') {
     const videoFile = document.getElementById('video-file').files[0];
-    const transcriptFile = document.getElementById('transcript-file-upload').files[0];
 
     if (videoFile) formData.append('video_file', videoFile);
-    if (transcriptFile) formData.append('transcript_file', transcriptFile);
 
-    if (!videoFile && !transcriptFile) {
-      showError('Upload a video file or transcript file.');
+    if (!videoFile) {
+      showError('Upload a video file.');
       resetButton();
       return;
     }
-  } else if (activeTab === 'transcript') {
-    const transcriptFile = document.getElementById('transcript-only-file').files[0];
-    if (!transcriptFile) {
-      showError('Please upload a transcript JSON file.');
-      resetButton();
-      return;
-    }
-    formData.append('transcript_file', transcriptFile);
   }
 
   try {
@@ -137,9 +127,9 @@ async function pollStatus(jobId) {
 /* ── Stage updates ── */
 const STAGE_NAMES = [
   null,
-  'Data Prep',
+  'AVI Index',
   'Model Init',
-  'Inference',
+  'Proposal',
   'Judges',
   'Post-process',
   'Config Gen',

@@ -28,6 +28,7 @@ from typing import Callable
 
 from backend import check_hf_reachable, get_backend, print_hf_unreachable_warning
 from config import (
+    AVI_INDEX_FILE,
     CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
     CONFIG_FILE,
@@ -35,9 +36,9 @@ from config import (
     DOCX_FILE,
     OUTPUT_FILE,
 )
+import avi as avi_client
 from config_generator import generate_config
-from data_prep import get_valid_chunks, prepare_data
-from extractor import fetch_transcript
+from data_prep.avi import get_valid_avi_chunks, load_avi_chunks
 from judges import JudgesPanel
 from judges.dedup import (
     dedup_bullets_llm,
@@ -45,7 +46,7 @@ from judges.dedup import (
     extract_bullets,
 )
 from judges.priority import classify_priorities
-from models import VLMProposer
+from models import AVIProposer
 from utils import flag_unknown_words
 
 try:
@@ -83,9 +84,7 @@ class StageUpdate:
 Callback = Callable[[StageUpdate], None]
 
 
-_VLM_MAX_RETRIES = 2
 _JUDGE_MAX_RETRIES = 2
-_VLM_TIMEOUT_SEC = 120
 _JUDGE_TIMEOUT_SEC = 60
 _BACKOFF_BASE_SEC = 2.0
 
@@ -163,6 +162,7 @@ class PipelineRunner:
         self._config_file = os.path.join(output_dir, os.path.basename(CONFIG_FILE))
         self._docx_file = os.path.join(output_dir, os.path.basename(DOCX_FILE))
         self._output_file = os.path.join(output_dir, os.path.basename(OUTPUT_FILE))
+        self._avi_index_file = os.path.join(output_dir, os.path.basename(AVI_INDEX_FILE))
 
         self._cancel_requested = False
         self._log_lines: list[str] = []
@@ -220,28 +220,34 @@ class PipelineRunner:
         # Clean old output before starting fresh
         self._clean_output_files()
 
-        # ── STAGE 1: DATA PREPARATION ──
-        self._emit(cb, StageUpdate(1, "Data Preparation", "running", "Preparing data...", 0.0))
+        # ── STAGE 1: DATA PREPARATION (Azure Video Indexer) ──
+        self._emit(cb, StageUpdate(1, "Azure Video Indexer", "running",
+                                    "Preparing data...", 0.0))
         stage1_start = time.time()
 
-        if self._video_id:
-            if not os.path.exists(self._transcript_path) or os.path.getsize(self._transcript_path) == 0:
-                fetch_transcript(video_id=self._video_id)
-        else:
-            if not os.path.exists(self._transcript_path):
-                raise FileNotFoundError(
-                    f"Transcript not found at {self._transcript_path}. "
-                    "Provide a YouTube ID or upload a transcript file."
-                )
+        if not os.path.exists(self._video_path) or os.path.getsize(self._video_path) == 0:
+            raise FileNotFoundError(
+                f"Video not found at {self._video_path}. "
+                "Azure Video Indexer requires the actual video file — provide "
+                "a YouTube ID / uploaded video or place the file at the video path."
+            )
 
-        chunks = prepare_data(
-            transcript_path=self._transcript_path,
+        self._emit(cb, StageUpdate(1, "Azure Video Indexer", "running",
+                                    "Uploading & indexing video in Azure...", 0.2))
+        self._check_cancelled()
+        index = avi_client.upload_and_index(
             video_path=self._video_path,
-            frame_dir=self._keyframe_dir,
+            output_dir=self._output_dir,
+            index_file=os.path.basename(self._avi_index_file),
         )
-        valid_chunks = get_valid_chunks(chunks)
-        self._emit(cb, StageUpdate(1, "Data Preparation", "done",
-                                    f"Prepared {len(valid_chunks)} chunks",
+        self._check_cancelled()
+
+        self._emit(cb, StageUpdate(1, "Azure Video Indexer", "running",
+                                    "Chunking AVI transcript + OCR...", 0.9))
+        chunks = load_avi_chunks(index)
+        valid_chunks = get_valid_avi_chunks(chunks)
+        self._emit(cb, StageUpdate(1, "Azure Video Indexer", "done",
+                                    f"Prepared {len(valid_chunks)} chunks from AVI",
                                     1.0, elapsed=time.time() - stage1_start))
 
         # ── STAGE 2: MODEL INITIALIZATION ──
@@ -254,7 +260,7 @@ class PipelineRunner:
         if not check_hf_reachable():
             print_hf_unreachable_warning()
 
-        # Clear any stale MLX GPU state from previous runs (safe no-op if mlx not available)
+        # Clear any stale GPU state from previous runs (safe no-op if mlx not available)
         self._clear_gpu_cache()
         self._check_cancelled()
 
@@ -262,19 +268,9 @@ class PipelineRunner:
         self._check_cancelled()
 
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",
-                                   "Loading VLM proposer...", 0.3))
+                                   "Setting up AVI proposer...", 0.3))
         self._check_cancelled()
-        try:
-            proposer = _with_retry(
-                fn=lambda: VLMProposer(backend=backend),
-                max_retries=_VLM_MAX_RETRIES,
-                label="VLM proposer load",
-            )
-        except Exception as e:
-            self._emit(cb, StageUpdate(2, "Model Initialization", "error",
-                                        f"VLM load failed after retries: {e}", 0,
-                                        elapsed=time.time() - stage2_start))
-            raise
+        proposer = AVIProposer(index=index)
         self._check_cancelled()
 
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",
@@ -292,9 +288,9 @@ class PipelineRunner:
                                     "Models initialized", 1.0,
                                     elapsed=time.time() - stage2_start))
 
-        # ── STAGE 3: INFERENCE ──
-        self._emit(cb, StageUpdate(3, "Inference", "running",
-                                   f"Processing {len(valid_chunks)} chunks...", 0.0))
+        # ── STAGE 3: PROPOSAL (Azure Video Indexer context) ──
+        self._emit(cb, StageUpdate(3, "Proposal", "running",
+                                   f"Building {len(valid_chunks)} chunk contexts...", 0.0))
         stage3_start = time.time()
 
         checkpointed = _load_checkpoint(self._checkpoint_file)
@@ -309,7 +305,7 @@ class PipelineRunner:
         all_extracted = list(checkpointed) if checkpointed else []
 
         if not remaining_chunks:
-            self._emit(cb, StageUpdate(3, "Inference", "skipped",
+            self._emit(cb, StageUpdate(3, "Proposal", "skipped",
                                         "All chunks in checkpoint", 1.0,
                                         elapsed=time.time() - stage3_start))
         else:
@@ -319,27 +315,21 @@ class PipelineRunner:
                 if checkpointed else None
             )
             if resume_info:
-                self._emit(cb, StageUpdate(3, "Inference", "running",
+                self._emit(cb, StageUpdate(3, "Proposal", "running",
                                             resume_info, 0.0))
 
             for i, (bucket_index, chunk_data) in enumerate(remaining_chunks, 1):
                 self._check_cancelled()
 
-                combined_text = " ".join(chunk_data["text_lines"])
-                frame_paths = chunk_data["frame_paths"]
                 label = f"Chunk {bucket_index + 1} [{i}/{len(remaining_chunks)}]"
 
                 t = time.time()
                 try:
-                    with backend.usage.stage("stage3_vlm"):
-                        response = _with_retry(
-                            fn=lambda fp=frame_paths, tx=combined_text: proposer.generate(fp, tx),
-                            max_retries=_VLM_MAX_RETRIES,
-                            label=label,
-                        )
+                    response = proposer.generate(chunk_data)
                     elapsed = time.time() - t
                 except Exception as e:
                     elapsed = time.time() - t
+                    print(f"    {label} failed: {e}")
                     response = None
 
                 chunk_record = {
@@ -355,15 +345,13 @@ class PipelineRunner:
 
                 progress = i / len(remaining_chunks)
                 msg = f"Chunk {bucket_index + 1}/{len(valid_chunks)} ({elapsed:.1f}s)"
-                self._emit(cb, StageUpdate(3, "Inference", "running",
+                self._emit(cb, StageUpdate(3, "Proposal", "running",
                                             msg, progress))
 
             inference_elapsed = time.time() - stage3_start
-            self._emit(cb, StageUpdate(3, "Inference", "done",
-                                        f"Inferred {len(remaining_chunks)} chunks",
+            self._emit(cb, StageUpdate(3, "Proposal", "done",
+                                        f"Prepared {len(remaining_chunks)} chunks",
                                         1.0, elapsed=inference_elapsed))
-
-        proposer.unload()
 
         # ── STAGE 4: JUDGES REFINEMENT ──
         self._emit(cb, StageUpdate(4, "Judges Refinement", "running",

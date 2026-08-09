@@ -5,19 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "business-requirements-extractor"
 version = "1.0.0"
-description = "Extract functional business requirements from product demo videos via VLM + LLM judges"
+description = "Extract functional business requirements from product demo videos via Azure Video Indexer + LLM judges"
 requires-python = ">=3.12"
 dependencies = [
     # Platform-agnostic — used regardless of inference backend
     "sentence-transformers>=3.0.0",
     "numpy>=1.26.0",
-    "opencv-python-headless>=4.8.0",
-    "youtube-transcript-api>=1.0",
     "huggingface-hub>=0.23.0",
     "python-dotenv>=1.0.0",
     "pyspellchecker>=0.8.3",
 
-    # Apple Silicon only — MLXBackend
+    # Apple Silicon only — MLXBackend (judge LLM / unified VLM-as-LLM)
     "mlx-vlm>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.19.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 

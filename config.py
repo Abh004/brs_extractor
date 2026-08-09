@@ -94,14 +94,50 @@ PRIORITY_MAX_TOKENS = 120
 DEDUP_MAX_TOKENS = 500
 CONFIG_MAX_TOKENS = 1200
 
-# Prompts
-PROPOSER_PROMPT = (
-    "You are a strict systems analyst watching a software tutorial. Your job is to translate "
-    "the observed UI actions into functional system capabilities. Do NOT infer business goals, "
-    "ROI, or marketing claims. Combine granular micro-actions (e.g., 'click line', 'click circle') "
-    "into broader feature sets (e.g., 'The system must provide 2D geometric sketching tools'). "
-    "Output ONLY a valid JSON array of strings in the form: 'The system shall allow users to [perform specific technical action]'.\n\n"
-    "Transcript: {transcript}"
+# ── Azure Video Indexer ─────────────────────────
+AVI_LANGUAGE = "en-US"
+AVI_UPLOAD_NAME = "brs-pipeline-demo"
+AVI_INDEX_FILE = "avi_index.json"
+AVI_INDEX_TIMEOUT_SEC = 600  # max seconds to wait for AVI to finish indexing
+AVI_POLL_INTERVAL_SEC = 10
+
+# Env vars consumed by avi.py (loaded via python-dotenv):
+#   AZURE_VIDEO_INDEXER_LOCATION        e.g. "trial" or a region like "eastus"
+#   AZURE_VIDEO_INDEXER_ACCOUNT_ID      AVI account GUID
+#   AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN   contributor account access token
+#   AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY optional x-trialsubscriptionkey fallback
+
+# AVI proposer → judge: how many requirement bullets the judge should emit
+# per 20s chunk from the OCR screen-text + transcript context.
+AVI_JUDGE_MAX_BULLETS = 8
+
+# ── Prompts ─────────────────────────────────────────────────────────────
+# The AVI judge reads RAW OCR (on-screen UI text) + transcript for a chunk
+# and EMITS "The system shall ..." bullets — the job a local VLM used to do.
+# This replaces VLMProposer as the proposer; the judge LLM now converts
+# screen text into testable capabilities.
+AVI_JUDGE_SYSTEM = (
+    "You are a strict systems analyst watching a software demo. Below you will be "
+    "given OCR (on-screen text captured from the video frames) and the spoken "
+    "transcript for one segment of a product demo.\n"
+    "- Translate the observed UI and narrated behaviour into distinct, testable "
+    "system capabilities.\n"
+    "- Do NOT infer business goals, ROI, or marketing claims.\n"
+    "- Combine granular micro-actions into broader feature sets (e.g. 'click line', "
+    "'click circle' → 'The system must provide 2D geometric sketching tools').\n"
+    "- Each bullet must be phrased as: "
+    "'The system shall allow users to [specific technical action]'.\n"
+    "- Prefer on-screen UI text (labels, buttons, menus) when it is present — it "
+    "usually names the feature more precisely than speech.\n"
+    "- Drop duplication and generic statements. No preamble, plain text only.\n"
+    f"Maximum {AVI_JUDGE_MAX_BULLETS} bullets."
+)
+
+# Compose the per-chunk raw context the AVI judge consumes. Kept here so the
+# exact formatting is tunable in one place.
+AVI_RAW_TEMPLATE = (
+    "SCREEN TEXT:\n{screen_text}\n\n"
+    "SPOKEN TRANSCRIPT:\n{transcript}"
 )
 
 # Judges configuration — single judge, replacing the 3-judge panel

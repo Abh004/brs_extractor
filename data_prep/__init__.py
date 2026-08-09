@@ -1,22 +1,19 @@
 """
 Data preparation module for chunking video and transcript data.
-Handles video frame extraction and transcript chunking.
 
-Frame extraction resizes each frame to FRAME_SIZE (448×448, Qwen3-VL native)
-at save time so the VLM never rescales internally.
-
-The keyframe cache is video-aware: a .video_id marker file records which
-VIDEO_ID the cached frames belong to. If the ID changes, the cache is
-cleared automatically.
+The proposer is now Azure Video Indexer: the judge is fed from on-screen OCR
+text + transcript via data_prep.avi. The legacy local keyframe/OpenCV path
+(keyframes, pipeline) is intentionally NOT imported here so the main pipeline
+has no hard OpenCV dependency. Import it explicitly if a local-frames path is
+ever needed again:
+    from data_prep.keyframes import extract_keyframes
 """
 
-from .keyframes import extract_keyframes
-from .pipeline import get_valid_chunks, prepare_data
+from .avi import get_valid_avi_chunks, load_avi_chunks
 from .transcript import load_transcript
 
 __all__ = [
     "load_transcript",
-    "extract_keyframes",
-    "prepare_data",
-    "get_valid_chunks",
+    "load_avi_chunks",
+    "get_valid_avi_chunks",
 ]
