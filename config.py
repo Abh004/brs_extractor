@@ -112,7 +112,6 @@ AVI_RETRY_BACKOFF = 2.0
 #   AZURE_VIDEO_INDEXER_LOCATION        e.g. "trial" or a region like "eastus"
 #   AZURE_VIDEO_INDEXER_ACCOUNT_ID      AVI account GUID
 #   AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN   contributor account access token
-#   AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY optional x-trialsubscriptionkey fallback
 #   AZURE_VIDEO_INDEXER_ENDPOINT        optional data-plane host override for
 #                                       private-endpoint accounts (default
 #                                       "api.videoindexer.ai"). Set to your

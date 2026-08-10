@@ -11,12 +11,9 @@ pipeline entry points):
 
   AZURE_VIDEO_INDEXER_LOCATION          e.g. "eastus" (or "trial")
   AZURE_VIDEO_INDEXER_ACCOUNT_ID        AVI account GUID
-  AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY  long-lived API key (recommended)
   AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN     Contributor account access token
 
-Provide ONE of the two credentials: either the long-lived subscription key
-(x-trialsubscriptionkey, recommended) or the short-lived (~1h) access token.
-If both are set, the subscription key takes precedence.
+The account access token (short-lived, ~1h) is sent as a bearer token.
 
 HTTP uses the requests library (streaming upload + retry/backoff) so
 transient connection aborts from corporate proxies/firewalls (e.g. Windows
@@ -105,27 +102,19 @@ def _verify() -> bool | str:
 
 
 def _authed(headers: dict[str, str] | None = None) -> dict[str, str]:
-    """Build request headers using whichever AVI credential is configured.
+    """Build request headers using the AVI account access token.
 
-    Auth is mutually exclusive: the long-lived subscription key
-    (x-trialsubscriptionkey) is preferred and used alone if set; otherwise the
-    Contributor account access token is sent as a bearer token. If neither is
-    set a clear error names the missing config.
+    The account access token (AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN) is sent as a
+    bearer token. A clear error names the missing config if it is not set.
     """
     headers = dict(headers or {})
     headers.setdefault("Content-Type", "application/json")
-    sub_key = os.getenv("AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY", "").strip()
     token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "").strip()
-    if sub_key:
-        headers["x-trialsubscriptionkey"] = sub_key
-    elif token:
-        headers["Authorization"] = f"Bearer {token}"
-    else:
+    if not token:
         raise RuntimeError(
-            "No AVI credential set. Provide either "
-            "AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY (recommended) or "
-            "AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN."
+            "No AVI credential set. Set AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN."
         )
+    headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -184,8 +173,7 @@ def _request(
     if resp.status_code in (401, 403):
         raise RuntimeError(
             f"AVI HTTP {resp.status_code}: check AVI credentials "
-            f"(AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY or "
-            f"AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN)."
+            f"(AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN)."
         )
     if resp.status_code >= 400:
         raise RuntimeError(
