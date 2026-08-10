@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.parse
 from typing import Any
@@ -55,6 +56,44 @@ def _env(key: str) -> str:
             f"Set it in your environment / .env file."
         )
     return value
+
+
+def _resolved_ip(host: str) -> str:
+    """Best-effort DNS resolution of `host` to a numeric IP (for diagnostics).
+
+    A private-endpoint host should resolve to a 10.x/172.x/192.x address.
+    Resolving to a public IP (or failing) is the usual cause of
+    "public access has been disabled" / 404 when the account sits behind a
+    private endpoint.
+    """
+    try:
+        addrs = [
+            info[4][0]
+            for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ]
+    except OSError as e:
+        return f"<resolve error: {e}>"
+    return ", ".join(dict.fromkeys(addrs)) or "<none>"
+
+
+def _diagnose(method: str, url: str, resp) -> None:
+    """Print a diagnostic line for an AVI call: resolved IP, status, body.
+
+    Called on non-2xx responses so a misrouted call (public vs private
+    endpoint, wrong path, auth/channel issue) is self-explanatory in the log.
+    The access token is redacted from the body.
+    """
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url).hostname or ""
+    body = getattr(resp, "text", "") or ""
+    token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "")
+    if token and token in body:
+        body = body.replace(token, "<redacted>")
+    print(f"  [AVI][diag] {method} {url}")
+    print(f"  [AVI][diag] resolved IP: {_resolved_ip(host)}")
+    print(f"  [AVI][diag] status: {getattr(resp, 'status_code', '?')}")
+    print(f"  [AVI][diag] body: {body[:2000]}")
 
 
 def _source_identity(path: str) -> str:
@@ -171,11 +210,13 @@ def _request(
         ) from e
 
     if resp.status_code in (401, 403):
+        _diagnose(method, url, resp)
         raise RuntimeError(
             f"AVI HTTP {resp.status_code}: check AVI credentials "
             f"(AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN)."
         )
     if resp.status_code >= 400:
+        _diagnose(method, url, resp)
         raise RuntimeError(
             f"AVI HTTP {resp.status_code} {method} {url} -> {resp.text[:500]}"
         )
@@ -242,6 +283,7 @@ def upload_and_index(
             f"set AVI_NO_PROXY=1 to bypass the proxy."
         ) from e
     if resp.status_code >= 400:
+        _diagnose("POST", upload_url, resp)
         raise RuntimeError(
             f"AVI HTTP {resp.status_code} POST {upload_url} -> {resp.text[:500]}"
         )
