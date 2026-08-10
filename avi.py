@@ -76,8 +76,15 @@ def _marker_matches(marker_path: str, video_path: str) -> bool:
 
 
 def _account_url(location: str, account_id: str) -> str:
-    """Base URL for a Video Indexer account."""
-    return f"https://api.videoindexer.ai/{location}/Accounts/{account_id}"
+    """Base URL for a Video Indexer account.
+
+    The data-plane host defaults to the public endpoint (api.videoindexer.ai).
+    For a private-endpoint account, override the host via the env var
+    AZURE_VIDEO_INDEXER_ENDPOINT (e.g. "<account>.api.videoindexer.ai") so
+    requests resolve to the private endpoint IP.
+    """
+    host = os.getenv("AZURE_VIDEO_INDEXER_ENDPOINT", "api.videoindexer.ai").strip()
+    return f"https://{host}/{location}/Accounts/{account_id}"
 
 
 def _verify() -> bool | str:

@@ -113,6 +113,12 @@ AVI_RETRY_BACKOFF = 2.0
 #   AZURE_VIDEO_INDEXER_ACCOUNT_ID      AVI account GUID
 #   AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN   contributor account access token
 #   AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY optional x-trialsubscriptionkey fallback
+#   AZURE_VIDEO_INDEXER_ENDPOINT        optional data-plane host override for
+#                                       private-endpoint accounts (default
+#                                       "api.videoindexer.ai"). Set to your
+#                                       account FQDN that resolves to the
+#                                       private endpoint IP, e.g.
+#                                       "<account>.api.videoindexer.ai".
 
 # AVI proposer → judge: how many requirement bullets the judge should emit
 # per 20s chunk from the OCR screen-text + transcript context.
