@@ -123,6 +123,46 @@ def _account_url(location: str, account_id: str) -> str:
     return f"https://{host}/{location}/Accounts/{account_id}"
 
 
+_resolve_override_applied = False
+
+
+def _apply_resolve_override() -> None:
+    """Route the AVI endpoint host to a fixed IP at the app layer.
+
+    On a locked-down corporate laptop (no admin / no hosts-file edits), DNS for
+    `AZURE_VIDEO_INDEXER_ENDPOINT` may still resolve to the PUBLIC endpoint of
+    a private-endpoint-only account, yielding `404 resource not found`. Setting
+    `AZURE_VIDEO_INDEXER_RESOLVE_IP` (the private endpoint's IP, e.g. 10.x)
+    makes this process connect to that IP while keeping the FQDN in the URL, so
+    the TLS SNI / Host header still identify the account correctly.
+
+    Implemented as an idempotent monkeypatch of socket.getaddrinfo (what
+    requests/urllib3 use to resolve hosts); every other hostname is passed
+    through untouched.
+    """
+    global _resolve_override_applied
+    if _resolve_override_applied:
+        return
+    ip = os.getenv("AZURE_VIDEO_INDEXER_RESOLVE_IP", "").strip()
+    host = os.getenv(
+        "AZURE_VIDEO_INDEXER_ENDPOINT", "api.videoindexer.ai"
+    ).strip().lower()
+    if not ip:
+        return
+    original = socket.getaddrinfo
+
+    def _patched(hostname, port, *args, **kwargs):
+        if hostname is not None and hostname.lower() == host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+        return original(hostname, port, *args, **kwargs)
+
+    socket.getaddrinfo = _patched
+    _resolve_override_applied = True
+
+
+_apply_resolve_override()
+
+
 def _verify() -> bool | str:
     """Return the TLS verification setting for AVI requests.
 
@@ -175,6 +215,7 @@ def _session() -> requests.Session:
         status_forcelist=set(),
         allowed_methods=frozenset({"GET", "POST"}),
     )
+    _apply_resolve_override()
     adapter = requests.adapters.HTTPAdapter(max_retries=retry)
     session = requests.Session()
     session.mount("https://", adapter)

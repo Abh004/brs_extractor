@@ -118,6 +118,12 @@ AVI_RETRY_BACKOFF = 2.0
 #                                       account FQDN that resolves to the
 #                                       private endpoint IP, e.g.
 #                                       "<account>.api.videoindexer.ai".
+#   AZURE_VIDEO_INDEXER_RESOLVE_IP      optional private endpoint IP to connect
+#                                       to for AZURE_VIDEO_INDEXER_ENDPOINT when
+#                                       DNS still resolves the FQDN publicly on
+#                                       a locked-down laptop (no hosts-file
+#                                       access). App-level DNS override; SNI/Host
+#                                       keep the FQDN.
 
 # AVI proposer → judge: how many requirement bullets the judge should emit
 # per 20s chunk from the OCR screen-text + transcript context.
