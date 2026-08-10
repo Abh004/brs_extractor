@@ -76,21 +76,30 @@ def _resolved_ip(host: str) -> str:
     return ", ".join(dict.fromkeys(addrs)) or "<none>"
 
 
+def _redact_url(url: str) -> str:
+    """Strip the access token from a URL for logs/errors."""
+    token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "")
+    if token:
+        url = url.replace(f"accessToken={token}", "accessToken=<redacted>")
+    return url
+
+
 def _diagnose(method: str, url: str, resp) -> None:
     """Print a diagnostic line for an AVI call: resolved IP, status, body.
 
     Called on non-2xx responses so a misrouted call (public vs private
     endpoint, wrong path, auth/channel issue) is self-explanatory in the log.
-    The access token is redacted from the body.
+    The access token is redacted from the body and the printed URL.
     """
     from urllib.parse import urlsplit
 
     host = urlsplit(url).hostname or ""
     body = getattr(resp, "text", "") or ""
     token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "")
+    display_url = _redact_url(url)
     if token and token in body:
         body = body.replace(token, "<redacted>")
-    print(f"  [AVI][diag] {method} {url}")
+    print(f"  [AVI][diag] {method} {display_url}")
     print(f"  [AVI][diag] resolved IP: {_resolved_ip(host)}")
     print(f"  [AVI][diag] status: {getattr(resp, 'status_code', '?')}")
     print(f"  [AVI][diag] body: {body[:2000]}")
@@ -180,20 +189,44 @@ def _verify() -> bool | str:
     return True
 
 
-def _authed(headers: dict[str, str] | None = None) -> dict[str, str]:
-    """Build request headers using the AVI account access token.
-
-    The account access token (AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN) is sent as a
-    bearer token. A clear error names the missing config if it is not set.
-    """
-    headers = dict(headers or {})
-    headers.setdefault("Content-Type", "application/json")
+def _account_token() -> str:
+    """Return the AVI account access token, raising a clear error if unset."""
     token = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN", "").strip()
     if not token:
         raise RuntimeError(
             "No AVI credential set. Set AZURE_VIDEO_INDEXER_ACCOUNT_TOKEN."
         )
-    headers["Authorization"] = f"Bearer {token}"
+    return token
+
+
+def _append_access_token(url: str) -> str:
+    """Add/substitute the account access token as the `accessToken` query param.
+
+    The AVI data plane (including private-endpoint front doors) authenticates
+    via the `?accessToken=` query parameter (as in Microsoft's SDK), not an
+    `Authorization` header. Returns a new URL with the token URL-encoded, either
+    appended to existing query params or added as the first one.
+    """
+    token = _account_token()
+    parts = urllib.parse.urlsplit(url)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    query["accessToken"] = token
+    encoded = urllib.parse.urlencode(query)
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, encoded, parts.fragment)
+    )
+
+
+def _authed(headers: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the base request headers for an AVI call.
+
+    Auth is carried via the `?accessToken=` query parameter (see
+    `_append_access_token`), so only a JSON content type is set here. A clear
+    error names the missing config if the token is not set.
+    """
+    headers = dict(headers or {})
+    headers.setdefault("Content-Type", "application/json")
+    _account_token()
     return headers
 
 
@@ -230,6 +263,8 @@ def _request(
     method: str, url: str, headers: dict[str, str], body: bytes | None = None
 ) -> Any:
     """Perform an HTTP request and return the parsed JSON body."""
+    url = _append_access_token(url)
+    display_url = _redact_url(url)
     try:
         resp = _session().request(
             method,
@@ -246,7 +281,7 @@ def _request(
         ) from e
     except requests.exceptions.RequestException as e:
         raise RuntimeError(
-            f"AVI network error during {method} {url}: {e}. Check your "
+            f"AVI network error during {method} {display_url}: {e}. Check your "
             f"VPN/proxy/firewall, or set AVI_NO_PROXY=1 to bypass the proxy."
         ) from e
 
@@ -259,7 +294,7 @@ def _request(
     if resp.status_code >= 400:
         _diagnose(method, url, resp)
         raise RuntimeError(
-            f"AVI HTTP {resp.status_code} {method} {url} -> {resp.text[:500]}"
+            f"AVI HTTP {resp.status_code} {method} {display_url} -> {resp.text[:500]}"
         )
     if not resp.text.strip():
         return None
@@ -301,6 +336,7 @@ def upload_and_index(
     # Upload (streaming multipart via requests).
     name_enc = urllib.parse.quote(name)
     upload_url = f"{base}/Videos/{name_enc}?language={urllib.parse.quote(language)}"
+    upload_url = _append_access_token(upload_url)
     print(f"  [AVI] Uploading '{os.path.basename(video_path)}' as '{name}'...")
     upload_headers = _authed({})
     try:
@@ -324,9 +360,10 @@ def upload_and_index(
             f"set AVI_NO_PROXY=1 to bypass the proxy."
         ) from e
     if resp.status_code >= 400:
+        display_url = _redact_url(upload_url)
         _diagnose("POST", upload_url, resp)
         raise RuntimeError(
-            f"AVI HTTP {resp.status_code} POST {upload_url} -> {resp.text[:500]}"
+            f"AVI HTTP {resp.status_code} POST {display_url} -> {resp.text[:500]}"
         )
     result = resp.json() if resp.text.strip() else None
     video_id = result.get("id") if isinstance(result, dict) else None
