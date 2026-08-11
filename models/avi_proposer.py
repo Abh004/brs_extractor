@@ -7,7 +7,7 @@ run any on-device model. Instead it assembles the raw per-chunk context
 bullets.
 
 Kept as a thin object so pipeline_runner's Stage-3 loop reads identically to
-how it drove VLMProposer:
+how it drove the old local VLM proposer:
     proposer.generate(chunk) -> raw_model_output string
 """
 
@@ -41,4 +41,4 @@ class AVIProposer:
         ).strip()
 
     def unload(self) -> None:
-        """No-op for interface parity with VLMProposer."""
+        """No-op — the AVI proposer holds no local model."""

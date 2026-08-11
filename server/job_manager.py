@@ -74,9 +74,7 @@ class JobManager:
     async def create_job(
         self,
         backend_name: str | None = None,
-        video_id: str | None = None,
         video_path: str = "input/video.mp4",
-        transcript_path: str = "input/transcript.json",
     ) -> Job | None:
         async with self._lock:
             if self.is_busy:
@@ -97,9 +95,7 @@ class JobManager:
         self,
         job: Job,
         backend_name: str | None = None,
-        video_id: str | None = None,
         video_path: str = "input/video.mp4",
-        transcript_path: str = "input/transcript.json",
     ):
         def on_update(update: StageUpdate):
             now = time.time()
@@ -139,9 +135,7 @@ class JobManager:
 
         runner = PipelineRunner(
             backend_name=backend_name,
-            video_id=video_id,
             video_path=video_path,
-            transcript_path=transcript_path,
         )
         job._runner = runner
 

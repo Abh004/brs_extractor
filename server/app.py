@@ -18,7 +18,7 @@ from fastapi import FastAPI, Form, HTTPException, UploadFile, WebSocket, WebSock
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import CONFIG_FILE, DOCX_FILE, OUTPUT_FILE, TRANSCRIPT_PATH, VIDEO_PATH
+from config import CONFIG_FILE, DOCX_FILE, OUTPUT_FILE, VIDEO_PATH
 from server.job_manager import JobStatus, manager
 
 
@@ -49,10 +49,8 @@ async def index():
 
 @app.post("/api/run")
 async def run_pipeline(
-    video_id: str | None = Form(None),
     backend: str | None = Form(None),
     video_file: UploadFile | None = None,
-    transcript_file: UploadFile | None = None,
 ):
     if manager.is_busy:
         raise HTTPException(409, "A pipeline job is already running. Wait for it to finish or cancel it.")
@@ -60,29 +58,20 @@ async def run_pipeline(
     os.makedirs(os.path.dirname(VIDEO_PATH) or ".", exist_ok=True)
 
     video_path = VIDEO_PATH
-    transcript_path = TRANSCRIPT_PATH
 
     if video_file and video_file.filename:
         with open(video_path, "wb") as f:
             content = await video_file.read()
             f.write(content)
 
-    if transcript_file and transcript_file.filename:
-        with open(transcript_path, "wb") as f:
-            content = await transcript_file.read()
-            f.write(content)
-
     job = await manager.create_job(
         backend_name=backend,
-        video_id=video_id or None,
         video_path=video_path,
-        transcript_path=transcript_path,
     )
     if job is None:
         raise HTTPException(409, "Could not create job (concurrency limit).")
 
-    manager.start_job(job, backend_name=backend, video_id=video_id or None,
-                       video_path=video_path, transcript_path=transcript_path)
+    manager.start_job(job, backend_name=backend, video_path=video_path)
 
     return {"job_id": job.id, "status": "started"}
 

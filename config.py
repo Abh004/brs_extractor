@@ -9,12 +9,8 @@ model references from here, so renaming a model is a single-line change.
 
 from dataclasses import dataclass
 
-VIDEO_ID = "YazxN78R_6M"
-
-# File paths
 VIDEO_PATH = "input/video.mp4"
 TRANSCRIPT_PATH = "input/transcript.json"
-FRAME_DIR = "keyframes"
 OUTPUT_FILE = "output/extracted_requirements.json"
 CHECKPOINT_FILE = "output/extracted_requirements_checkpoint.jsonl"
 CONFIG_FILE = "output/project_config.json"
@@ -44,11 +40,6 @@ class ModelSpec:
     vlm_backed: bool = False
 
 
-PROPOSER = ModelSpec(
-    mlx_id="lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
-    hf_id="Qwen/Qwen3-VL-8B-Instruct",
-    no_think=True,
-)
 JUDGE = ModelSpec(
     mlx_id="lmstudio-community/Qwen3.5-9B-MLX-4bit",
     hf_id="Qwen/Qwen3.5-9B",
@@ -64,21 +55,17 @@ DEDUP = ModelSpec(
     no_think=True,
 )
 
-ALL_MODELS = [PROPOSER, JUDGE, DEDUP]
+ALL_MODELS = [JUDGE, DEDUP]
 
 ENCODER_MODEL = "all-MiniLM-L6-v2"
 
 # Backwards-compat aliases — keep consumer imports unchanged. Each maps to a
 # single registry entry so renaming a model is a one-line change above.
-MODEL_NAME = PROPOSER.mlx_id
 JUDGE_MODEL = JUDGE.mlx_id
 DEDUP_MODEL = DEDUP.mlx_id
 
 # Chunking configuration
 CHUNK_SIZE_SEC = 20
-FRAME_INTERVAL_SEC = 10
-
-FRAME_SIZE = (448, 448)
 
 # Generation configuration
 MAX_NEW_TOKENS = 512
@@ -146,9 +133,9 @@ AVI_JUDGE_MAX_BULLETS = 8
 
 # ── Prompts ─────────────────────────────────────────────────────────────
 # The AVI judge reads RAW OCR (on-screen UI text) + transcript for a chunk
-# and EMITS "The system shall ..." bullets — the job a local VLM used to do.
-# This replaces VLMProposer as the proposer; the judge LLM now converts
-# screen text into testable capabilities.
+# and EMITS "The system shall ..." bullets — the job the local frame-based
+# VLM proposer used to do. This replaces the local VLM proposer; the judge
+# LLM now converts screen text into testable capabilities.
 AVI_JUDGE_SYSTEM = (
     "You are a strict systems analyst watching a software demo. Below you will be "
     "given OCR (on-screen text captured from the video frames) and the spoken "

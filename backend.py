@@ -4,8 +4,10 @@ backend.py
 Inference backend abstraction for the pipeline.
 
 Select via environment variable:
-  BACKEND=mlx   (default) — Apple Silicon, MLX. Fast, native.
-  BACKEND=hf    — Any CUDA/CPU box. Uses HuggingFace transformers + PIL.
+  BACKEND=mlx      — Apple Silicon, MLX. Fast, native (judge LLM).
+  BACKEND=hf       — Any CUDA/CPU box. HuggingFace transformers.
+  BACKEND=foundry  — Hosted Azure Foundry / Azure OpenAI (gpt-4o) for all
+                     text-LLM stages; the proposer is AVI, not a local model.
 
 Usage:
   from backend import get_backend
@@ -32,22 +34,12 @@ from config import (
     FOUNDRY_RETRY_BACKOFF,
 )
 from usage import TokenTracker
-from utils import clean_output, is_truncated_think, strip_think_blocks
+from utils import clean_output, is_truncated_think
 
 
 def _result_text(result) -> str:
     """Extract the text from a generation result object or plain string."""
     return str(result.text) if hasattr(result, "text") else str(result)
-
-
-def _finalize_vlm_output(raw: str) -> str:
-    """
-    Post-process a VLM generation: drop truncated think blocks (return "")
-    and strip any complete <think>…</think> blocks from the rest.
-    """
-    if is_truncated_think(raw):
-        return ""
-    return strip_think_blocks(raw)
 
 
 def _finalize_llm_output(raw: str) -> str:
@@ -58,6 +50,31 @@ def _finalize_llm_output(raw: str) -> str:
     if is_truncated_think(raw):
         return ""
     return clean_output(raw)
+
+
+def _preload_hf_weights(model_id: str, label: str) -> None:
+    """Pre-download a HuggingFace model so a later load_llm() is instant.
+
+    Uses the local HF cache first, then falls back to a full download, and
+    raises a clear error if the weights are unreachable and not cached.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        snapshot_download(model_id, local_files_only=True)
+        print(f"  ✓ {label} (cached): {model_id}")
+        return
+    except Exception:
+        pass
+
+    try:
+        snapshot_download(model_id, local_files_only=False)
+        print(f"  ✓ {label}: {model_id}")
+    except Exception as e:
+        raise RuntimeError(
+            f"Judge model unavailable (remote unreachable and no local cache): "
+            f"{model_id}"
+        ) from e
 
 
 def _apply_chat_template(processor, messages, **kwargs) -> Any:
@@ -95,27 +112,6 @@ class InferenceBackend(ABC):
         self.usage = TokenTracker()
 
     @abstractmethod
-    def load_vlm(self, model_id: str) -> None:
-        """Load a VLM into memory. Must be called before generate_vlm."""
-
-    @abstractmethod
-    def generate_vlm(
-        self,
-        frame_paths: list[str],
-        transcript: str,
-        system_prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.0,
-        repetition_penalty: float | None = None,
-        repetition_context_size: int = 20,
-    ) -> str:
-        """Run multimodal inference. Returns raw text (not cleaned)."""
-
-    @abstractmethod
-    def unload_vlm(self) -> None:
-        """Free VLM weights. Safe to call even if nothing is loaded."""
-
-    @abstractmethod
     def load_llm(self, model_id: str) -> Any:
         """
         Load a text-only LLM and return an opaque handle.
@@ -139,6 +135,16 @@ class InferenceBackend(ABC):
     def unload_llm(self, handle: Any) -> None:
         """Free an LLM handle returned by load_llm."""
 
+    def preload(self, model_id: str) -> None:
+        """
+        Optionally pre-download a model's weights so a later load_llm() is fast.
+
+        Local backends (MLX/HF) pull the weights here so the expensive download
+        happens once in Stage 2 instead of stalling the first judge call.
+        Remote backends (Foundry) keep this default no-op — nothing is loaded
+        locally, so there is nothing to pre-download.
+        """
+
     @contextmanager
     def llm_context(self, model_id: str) -> Iterator[Any]:
         """
@@ -158,7 +164,7 @@ class InferenceBackend(ABC):
 
 class MLXBackend(InferenceBackend):
     """
-    Apple Silicon backend using mlx-vlm (VLM) and mlx_lm (LLM).
+    Apple Silicon backend using mlx_lm (judge LLM / unified VLM-as-LLM).
 
     Thread safety: MLX GPU streams are thread-local. This backend must only
     be called from the main thread — do not wrap calls in ThreadPoolExecutor.
@@ -170,10 +176,6 @@ class MLXBackend(InferenceBackend):
     def __init__(self) -> None:
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         self.usage = TokenTracker()
-        self._vlm_model = None
-        self._vlm_processor = None
-        self._vlm_config = None
-        self._vlm_model_id: str | None = None
 
     def _mlx_load_with_fallback(self, load_fn, model_id: str, **kwargs):
         """Try loading an MLX model, falling back to local files on network failure."""
@@ -194,84 +196,9 @@ class MLXBackend(InferenceBackend):
                 )
                 raise first_exc
 
-    def load_vlm(self, model_id: str) -> None:
-        import warnings
-
-        warnings.filterwarnings(
-            "ignore", message="Kwargs passed to `processor.__call__`"
-        )
-        from mlx_vlm import load
-        from mlx_vlm.utils import load_config
-
-        print(f"  [MLX] Loading VLM: {model_id}")
-        self._vlm_model, self._vlm_processor = self._mlx_load_with_fallback(load, model_id)
-        self._vlm_config = self._mlx_load_with_fallback(load_config, model_id)
-        self._vlm_model_id = model_id
-        print("  [MLX] VLM loaded.")
-
-    def generate_vlm(
-        self,
-        frame_paths: list[str],
-        transcript: str,
-        system_prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.0,
-        repetition_penalty: float | None = None,
-        repetition_context_size: int = 20,
-    ) -> str:
-        import mlx.core as mx
-        from mlx_vlm import generate
-        from mlx_vlm.prompt_utils import apply_chat_template
-
-        if self._vlm_model is None:
-            raise RuntimeError("VLM not loaded. Call load_vlm() first.")
-
-        prompt_text = system_prompt.format(transcript=transcript)
-        if self._vlm_model_id in self._NO_THINK_MODELS:
-            prompt_text += " /no_think"
-        prompt = apply_chat_template(
-            self._vlm_processor,
-            self._vlm_config,
-            prompt_text,
-            num_images=len(frame_paths),
-        )
-
-        try:
-            result = generate(
-                self._vlm_model,
-                self._vlm_processor,
-                prompt,
-                image=frame_paths,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
-                repetition_context_size=repetition_context_size,
-                verbose=False,
-            )
-        except Exception:
-            mx.clear_cache()
-            raise
-
-        mx.clear_cache()
-        self.usage.add(
-            model_id=self._vlm_model_id or "vlm",
-            prompt_tokens=getattr(result, "prompt_tokens", 0),
-            completion_tokens=getattr(result, "generation_tokens", 0),
-        )
-        return _finalize_vlm_output(_result_text(result))
-
-    def unload_vlm(self) -> None:
-        import mlx.core as mx
-
-        if self._vlm_model is None:
-            return
-        del self._vlm_model, self._vlm_processor
-        self._vlm_model = None
-        self._vlm_processor = None
-        self._vlm_config = None
-        self._vlm_model_id = None
-        mx.clear_cache()
-        print("  [MLX] VLM unloaded.")
+    def preload(self, model_id: str) -> None:
+        """Pre-download the judge weights (mlx_id) so the first judge call is instant."""
+        _preload_hf_weights(model_id, "Judge")
 
     def load_llm(self, model_id: str) -> dict:
         if model_id in self._VLM_BACKED_TEXT_MODELS:
@@ -478,9 +405,6 @@ class HFBackend(InferenceBackend):
 
     def __init__(self) -> None:
         self.usage = TokenTracker()
-        self._vlm_model = None
-        self._vlm_processor = None
-        self._vlm_model_id: str | None = None
         self._device: str = self._pick_device()
         print(f"  [HF] Device: {self._device}")
 
@@ -513,92 +437,9 @@ class HFBackend(InferenceBackend):
         except ImportError:
             return {}
 
-    def load_vlm(self, model_id: str) -> None:
-        try:
-            from transformers import AutoModelForImageTextToText as _AutoModelVLM
-        except ImportError:
-            from transformers import AutoModelForVision2Seq as _AutoModelVLM
-        from transformers import AutoProcessor
-
-        # Strip mlx-community prefix — map to canonical HF repo
-        hf_id = _mlx_to_hf(model_id)
-        print(f"  [HF] Loading VLM: {hf_id}  (mapped from {model_id})")
-
-        self._vlm_processor = _from_pretrained_safe(AutoProcessor, hf_id)
-        self._vlm_model = _from_pretrained_safe(
-            _AutoModelVLM,
-            hf_id,
-            device_map="auto" if self._device == "cuda" else self._device,
-            torch_dtype="auto",
-            **self._quant_kwargs(),
-            **_attn_kwargs(),
-        )
-        self._vlm_model_id = model_id
-        print("  [HF] VLM loaded.")
-
-    def generate_vlm(
-        self,
-        frame_paths: list[str],
-        transcript: str,
-        system_prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.0,
-        repetition_penalty: float | None = None,
-        repetition_context_size: int = 20,  # noqa: ARG002 — no HF equivalent; kept for interface parity with MLXBackend
-    ) -> str:
-        from PIL import Image
-
-        if self._vlm_model is None:
-            raise RuntimeError("VLM not loaded. Call load_vlm() first.")
-
-        images = [Image.open(p).convert("RGB") for p in frame_paths]
-        prompt_text = system_prompt.format(transcript=transcript)
-
-        messages = [{"role": "user", "content": []}]
-        for img in images:
-            messages[0]["content"].append({"type": "image", "image": img})
-        messages[0]["content"].append({"type": "text", "text": prompt_text})
-
-        inputs = _apply_chat_template(
-            self._vlm_processor,
-            messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(self._vlm_model.device)
-
-        gen_kwargs: dict = {"max_new_tokens": max_tokens}
-        if temperature > 0:
-            gen_kwargs.update({"do_sample": True, "temperature": temperature})
-        else:
-            gen_kwargs["do_sample"] = False
-        if repetition_penalty is not None:
-            gen_kwargs["repetition_penalty"] = repetition_penalty
-
-        output_ids = self._vlm_model.generate(**inputs, **gen_kwargs)
-        # Decode only the newly generated tokens
-        new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
-        raw = self._vlm_processor.decode(new_ids, skip_special_tokens=True)
-
-        self.usage.add(
-            model_id=self._vlm_model_id or "vlm",
-            prompt_tokens=int(inputs["input_ids"].shape[-1]),
-            completion_tokens=int(new_ids.shape[0]),
-        )
-
-        return _finalize_vlm_output(raw)
-
-    def unload_vlm(self) -> None:
-        import gc
-
-        if self._vlm_model is None:
-            return
-        del self._vlm_model, self._vlm_processor
-        self._vlm_model = None
-        self._vlm_processor = None
-        gc.collect()
-        self._try_cuda_empty_cache()
-        print("  [HF] VLM unloaded.")
+    def preload(self, model_id: str) -> None:
+        """Pre-download the judge weights (canonical HF id) so the first judge call is instant."""
+        _preload_hf_weights(_mlx_to_hf(model_id), "Judge")
 
     def load_llm(self, model_id: str) -> dict:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -795,29 +636,6 @@ class FoundryBackend(InferenceBackend):
             session.trust_env = False
             session.proxies = {}
         return session
-
-    # VLM methods are unused — the proposer is AVI, not a local model.
-    def load_vlm(self, model_id: str) -> None:
-        raise NotImplementedError(
-            "FoundryBackend is text-only; the AVI proposer replaces VLM inference."
-        )
-
-    def generate_vlm(
-        self,
-        frame_paths: list[str],
-        transcript: str,
-        system_prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.0,
-        repetition_penalty: float | None = None,
-        repetition_context_size: int = 20,
-    ) -> str:
-        raise NotImplementedError(
-            "FoundryBackend is text-only; the AVI proposer replaces VLM inference."
-        )
-
-    def unload_vlm(self) -> None:
-        pass
 
     def load_llm(self, model_id: str) -> dict:
         return {"model_id": self._deployment}

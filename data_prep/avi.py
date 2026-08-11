@@ -2,8 +2,8 @@
 data_prep/avi.py
 
 Chunk an Azure Video Indexer index into fixed-size time buckets, mirroring the
-shape of the local `data_prep.transcript` chunker so the rest of the pipeline
-(get_valid_chunks / Stage 3 proposer) is unchanged.
+shape of the old local chunker so the rest of the pipeline
+(get_valid_avi_chunks / Stage 3 proposer) is unchanged.
 
 Each chunk carries both spoken transcript lines (`text_lines`) and OCR
 screen-text lines (`ocr_lines`) so a judge can use the on-screen UI text,

@@ -3,12 +3,12 @@ usage.py
 
 Exact token-usage accounting for the inference pipeline.
 
-Every LLM/VLM generation in the project funnels through the backend's
-generate_vlm / generate_llm methods (backend.py), so a single TokenTracker
+Every LLM generation in the project funnels through the backend's
+generate_llm method (backend.py), so a single TokenTracker
 attached to the InferenceBackend can record a per-call token count without
 touching any call sites. The backend exposes exact prompt/completion counts
-(from mlx_vlm's GenerationResult, mlx_lm's stream_generate, or the HF
-input_ids / new_ids lengths), so no tokenizer round-trip estimation is needed.
+(from mlx_lm's stream_generate, the HF input_ids / new_ids lengths, or the
+Foundry usage payload), so no tokenizer round-trip estimation is needed.
 
 Stages are labelled with a small context-manager so records carry the pipeline
 stage that produced them (Stage 3 VLM, Stage 4 judge, Stage 5 dedup/priority,
@@ -55,7 +55,7 @@ class TokenTracker:
     Accumulates exact token usage across a pipeline run.
 
     Attach an instance to an InferenceBackend (backend.usage). The backend's
-    generate_vlm / generate_llm append UsageRecords; pipeline stages set the
+    generate_llm appends UsageRecords; pipeline stages set the
     active stage label via the `stage()` context manager.
     """
 

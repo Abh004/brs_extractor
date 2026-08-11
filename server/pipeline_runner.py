@@ -145,18 +145,12 @@ class PipelineRunner:
     def __init__(
         self,
         backend_name: str | None = None,
-        video_id: str | None = None,
         video_path: str = "input/video.mp4",
-        transcript_path: str = "input/transcript.json",
         output_dir: str = "output",
-        keyframe_dir: str = "keyframes",
     ):
         self._backend_name = backend_name
-        self._video_id = video_id
         self._video_path = video_path
-        self._transcript_path = transcript_path
         self._output_dir = output_dir
-        self._keyframe_dir = keyframe_dir
 
         self._checkpoint_file = os.path.join(output_dir, os.path.basename(CHECKPOINT_FILE))
         self._config_file = os.path.join(output_dir, os.path.basename(CONFIG_FILE))
