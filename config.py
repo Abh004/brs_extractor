@@ -148,14 +148,22 @@ AVI_JUDGE_SYSTEM = (
     "'The system shall allow users to [specific technical action]'.\n"
     "- Prefer on-screen UI text (labels, buttons, menus) when it is present — it "
     "usually names the feature more precisely than speech.\n"
+    "- Each OCR line is prefixed with the on-screen region where the text was "
+    "captured (e.g. '(top-right)'). Use these positions to describe the screen "
+    "layout — where buttons, menus, and panels sit (top/bottom, left/center/right, "
+    "and relative ordering) — like a visual review of the demo.\n"
+    "- Only report UI and layout that the OCR text and positions actually show; "
+    "do not invent controls that are not present.\n"
     "- Drop duplication and generic statements. No preamble, plain text only.\n"
     f"Maximum {AVI_JUDGE_MAX_BULLETS} bullets."
 )
 
 # Compose the per-chunk raw context the AVI judge consumes. Kept here so the
-# exact formatting is tunable in one place.
+# exact formatting is tunable in one place. OCR lines carry a normalized-screen
+# region prefix (e.g. "(top-right)") so the judge can reconstruct UI placement.
 AVI_RAW_TEMPLATE = (
-    "SCREEN TEXT:\n{screen_text}\n\n"
+    "SCREEN TEXT (on-screen UI labels with normalized screen region):\n"
+    "{screen_text}\n\n"
     "SPOKEN TRANSCRIPT:\n{transcript}"
 )
 

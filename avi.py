@@ -579,6 +579,36 @@ def get_ocr(index: dict) -> list[dict]:
     return _segs(_insights(index).get("ocr") or [])
 
 
+def get_ocr_spatial(index: dict) -> list[dict]:
+    """Return OCR segments with normalized screen position.
+
+    Each item: {start, end, text, left, top, width, height} where left/top/
+    width/height are the AVI-normalized (0..1) bounding box of the on-screen
+    text. Placement lets the judge describe button/menu locations, which the
+    old keyframe VLM captured but plain OCR text cannot.
+    """
+    items = _insights(index).get("ocr") or []
+    out: list[dict] = []
+    for it in items:
+        text = it.get("text") or ""
+        if not text:
+            continue
+        inst = (it.get("instances") or [{}])
+        inst = inst[0] if isinstance(inst, list) and inst else {}
+        start = inst.get("start", it.get("start"))
+        end = inst.get("end", it.get("end"))
+        out.append({
+            "start": start,
+            "end": end,
+            "text": text,
+            "left": it.get("left"),
+            "top": it.get("top"),
+            "width": it.get("width"),
+            "height": it.get("height"),
+        })
+    return out
+
+
 def save_index(index: dict, output_dir: str = "output", index_file: str = AVI_INDEX_FILE) -> str:
     """Persist the AVI index JSON to disk. Returns the path."""
     os.makedirs(output_dir, exist_ok=True)
