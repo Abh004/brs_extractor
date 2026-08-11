@@ -21,7 +21,16 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from config import ALL_MODELS
+import requests
+from urllib3.util.retry import Retry
+
+from config import (
+    ALL_MODELS,
+    FOUNDRY_CONNECT_TIMEOUT,
+    FOUNDRY_MAX_RETRIES,
+    FOUNDRY_READ_TIMEOUT,
+    FOUNDRY_RETRY_BACKOFF,
+)
 from usage import TokenTracker
 from utils import clean_output, is_truncated_think, strip_think_blocks
 
@@ -707,9 +716,168 @@ def print_hf_unreachable_warning() -> None:
     )
 
 
+class FoundryBackend(InferenceBackend):
+    """
+    Azure Foundry / Azure OpenAI chat-completions backend (text only).
+
+    Replaces the local judge/dedup/priority/config-gen models with a hosted
+    model (e.g. gpt-4o) reached over HTTPS. Reads from the environment:
+
+      FOUNDRY_ENDPOINT      base URL, e.g. https://<resource>.openai.azure.com/openai/v1/
+      FOUNDRY_API_KEY       API key for the endpoint
+      FOUNDRY_DEPLOYMENT    deployment name sent as the "model" field
+      FOUNDRY_VERIFY_SSL=0  optional: disable TLS verification (corporate TLS
+                            interception / GlobalProtect)
+      FOUNDRY_NO_PROXY=1    optional: ignore HTTP(S)_PROXY / NO_PROXY
+
+    load_llm is a lightweight handle factory (nothing is loaded locally); the
+    deployment name is resolved from the environment, so the model_id passed by
+    the pipeline (an MLX id) is ignored. generate_llm POSTs an OpenAI-style
+    chat/completions request and returns the assistant text.
+    """
+
+    def __init__(self) -> None:
+        self.usage = TokenTracker()
+        self._endpoint = os.getenv("FOUNDRY_ENDPOINT", "").rstrip("/")
+        self._api_key = os.getenv("FOUNDRY_API_KEY", "").strip()
+        self._deployment = os.getenv("FOUNDRY_DEPLOYMENT", "").strip()
+        missing = [
+            name
+            for name, val in (
+                ("FOUNDRY_ENDPOINT", self._endpoint),
+                ("FOUNDRY_API_KEY", self._api_key),
+                ("FOUNDRY_DEPLOYMENT", self._deployment),
+            )
+            if not val
+        ]
+        if missing:
+            raise RuntimeError(
+                "Missing required Foundry config: "
+                + ", ".join(missing)
+                + ". Set them in your environment / .env file."
+            )
+        self._no_proxy = os.getenv("FOUNDRY_NO_PROXY", "").strip() == "1"
+
+    def _verify(self) -> bool:
+        """Return the TLS verification setting (FOUNDRY_VERIFY_SSL=0 bypasses)."""
+        if os.getenv("FOUNDRY_VERIFY_SSL", "1").strip() == "0":
+            import warnings
+
+            warnings.simplefilter(
+                "ignore", requests.packages.urllib3.exceptions.InsecureRequestWarning
+            )
+            return False
+        return True
+
+    def _mask(self, text: str) -> str:
+        """Redact the API key from a string (for logs / error messages)."""
+        if self._api_key and self._api_key in text:
+            return text.replace(self._api_key, "<redacted>")
+        return text
+
+    def _session(self) -> requests.Session:
+        """Return a requests.Session with retry/backoff on transient failures."""
+        retry = Retry(
+            total=FOUNDRY_MAX_RETRIES,
+            connect=FOUNDRY_MAX_RETRIES,
+            read=FOUNDRY_MAX_RETRIES,
+            status=0,  # don't auto-retry on HTTP status; we surface those clearly
+            backoff_factor=FOUNDRY_RETRY_BACKOFF,
+            raise_on_status=False,
+            status_forcelist=set(),
+            allowed_methods=frozenset({"POST"}),
+        )
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        if self._no_proxy:
+            session.trust_env = False
+            session.proxies = {}
+        return session
+
+    # VLM methods are unused — the proposer is AVI, not a local model.
+    def load_vlm(self, model_id: str) -> None:
+        raise NotImplementedError(
+            "FoundryBackend is text-only; the AVI proposer replaces VLM inference."
+        )
+
+    def generate_vlm(
+        self,
+        frame_paths: list[str],
+        transcript: str,
+        system_prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+        repetition_penalty: float | None = None,
+        repetition_context_size: int = 20,
+    ) -> str:
+        raise NotImplementedError(
+            "FoundryBackend is text-only; the AVI proposer replaces VLM inference."
+        )
+
+    def unload_vlm(self) -> None:
+        pass
+
+    def load_llm(self, model_id: str) -> dict:
+        return {"model_id": self._deployment}
+
+    def generate_llm(
+        self,
+        handle: dict,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 150,
+        repetition_penalty: float | None = None,  # noqa: ARG002 — not an OpenAI param
+        repetition_context_size: int = 20,  # noqa: ARG002 — not an OpenAI param
+    ) -> str:
+        payload = {
+            "model": handle.get("model_id") or self._deployment,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+        }
+        url = f"{self._endpoint}/chat/completions"
+        headers = {"Content-Type": "application/json", "api-key": self._api_key}
+        try:
+            resp = self._session().post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=(FOUNDRY_CONNECT_TIMEOUT, FOUNDRY_READ_TIMEOUT),
+                verify=self._verify(),
+            )
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(
+                f"Foundry request failed for model {self._deployment}: "
+                f"{self._mask(str(e))}"
+            ) from e
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Foundry HTTP {resp.status_code} for model {self._deployment} "
+                f"(endpoint {self._endpoint}): {self._mask(resp.text[:500])}"
+            )
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        self.usage.add(
+            model_id=handle.get("model_id", self._deployment),
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+        )
+        return _finalize_llm_output(raw)
+
+    def unload_llm(self, handle: dict) -> None:
+        pass
+
+
 _BACKEND_MAP = {
     "mlx": MLXBackend,
     "hf": HFBackend,
+    "foundry": FoundryBackend,
 }
 
 

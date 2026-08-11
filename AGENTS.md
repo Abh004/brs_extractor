@@ -109,6 +109,11 @@ node generate_docx.js output/extracted_requirements.json output/BRS.docx output/
 
 # Use HuggingFace backend (cross-platform) instead of MLX
 BACKEND=hf python main.py
+
+# Use hosted Azure Foundry / Azure OpenAI (gpt-4o) for all text-LLM stages
+# (judge, dedup resolution, MoSCoW priority, config gen). Requires
+# FOUNDRY_ENDPOINT / FOUNDRY_API_KEY / FOUNDRY_DEPLOYMENT in .env.
+BACKEND=foundry python main.py
 ```
 
 ## Code Style & Conventions
@@ -161,6 +166,10 @@ BACKEND=hf python main.py
 (`backend.py`). The default `MLXBackend` runs on Apple Silicon via `mlx-vlm`/`mlx_lm`.
 Supports unified VLM-as-LLM for Qwen3.5-9B (loaded via `mlx_vlm` for text-only inference
 too). Set `BACKEND=hf` to use HuggingFace transformers + Pillow on any CUDA/MPS/CPU box.
+Set `BACKEND=foundry` to route all text-LLM stages (judge, dedup resolution, MoSCoW
+priority, config gen) to a hosted Azure Foundry / Azure OpenAI endpoint (e.g. gpt-4o)
+via `FoundryBackend`; the proposer remains AVI, so no local GPU models load and only
+MiniLM embeddings (dedup) stay local on CPU.
 Model ID mapping (`_MLX_TO_HF` in `backend.py`) translates `lmstudio-community`/`mlx-community`
 IDs to canonical HuggingFace repo IDs for cross-backend compatibility. Flash-attention 2
 auto-detected at import time.
@@ -234,7 +243,8 @@ No tests are implemented yet.
 
 ## Extensibility Hooks
 
-- **Backend:** Select MLX (Apple Silicon) or HF (CUDA/CPU) via `BACKEND` env var.
+- **Backend:** Select MLX (Apple Silicon), HF (CUDA/CPU), or Foundry (hosted
+  Azure OpenAI, text-only) via `BACKEND` env var.
   Add new backends by implementing `InferenceBackend` ABC in `backend.py`.
 - **Models:** Swap proposer or judge models by editing `MODEL_NAME`, `JUDGE_MODEL`,
   `DEDUP_MODEL` in `config.py`. For HF backend, add model ID mapping in `_MLX_TO_HF`

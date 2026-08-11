@@ -126,6 +126,20 @@ AVI_UPLOAD_TIMEOUT_SEC = 900  # generous read timeout for large video uploads
 #                                       access). App-level DNS override; SNI/Host
 #                                       keep the FQDN.
 
+# ── Azure Foundry / Azure OpenAI (judge backend) ─────────────
+# Optional hosted text-LLM backend for the judge, dedup resolution, MoSCoW
+# priority, and config generation. Set BACKEND=foundry to use it instead of
+# the local MLX/HF models. Env vars consumed by backend.FoundryBackend:
+#   FOUNDRY_ENDPOINT      base URL, e.g. https://<resource>.openai.azure.com/openai/v1/
+#   FOUNDRY_API_KEY       API key for the endpoint
+#   FOUNDRY_DEPLOYMENT    deployment name sent as the "model" field (e.g. gpt-4o)
+#   FOUNDRY_VERIFY_SSL=0  optional: disable TLS verification (corporate interception)
+#   FOUNDRY_NO_PROXY=1    optional: ignore HTTP(S)_PROXY / NO_PROXY
+FOUNDRY_MAX_RETRIES = 3
+FOUNDRY_CONNECT_TIMEOUT = 30
+FOUNDRY_READ_TIMEOUT = 180
+FOUNDRY_RETRY_BACKOFF = 2.0
+
 # AVI proposer → judge: how many requirement bullets the judge should emit
 # per 20s chunk from the OCR screen-text + transcript context.
 AVI_JUDGE_MAX_BULLETS = 8
