@@ -8,17 +8,12 @@ backend.py and config_generator.py:
   - _strip_special_tokens  (was copied in both files)
   - _strip_think_blocks    (was copied in both files)
   - clean_output           (was in backend.py only)
-  - normalize_embeddings   (extracted from dedup.py to remove the
-                            L2-norm duplication between _cosine_matrix
-                            and _cosine_similarity_against_pool)
 """
 
 from __future__ import annotations
 
 import json
 import re
-
-import numpy as np
 
 # ── compiled patterns (module-level — compiled once) ─────────────────────────
 
@@ -255,23 +250,3 @@ def extract_balanced_json(text: str) -> dict | None:
                 except json.JSONDecodeError:
                     return None
     return None  # never closed — truncated output
-
-
-# ── embedding helpers ─────────────────────────────────────────────────────────
-
-
-def normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
-    """
-    L2-normalise a (N, D) embedding matrix row-wise.
-    Zero vectors are kept as-is (norm replaced with 1e-9 to avoid division
-    by zero, producing a near-zero vector rather than NaN).
-
-    Args:
-        embeddings: (N, D) float array
-
-    Returns:
-        (N, D) float array where each row has unit L2 norm
-    """
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1e-9, norms)
-    return embeddings / norms

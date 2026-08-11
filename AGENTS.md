@@ -2,7 +2,7 @@
 
 This project extracts functional business requirements from product demo videos by combining
 an Azure Video Indexer (AVI) cloud proposer — per-20s-chunk OCR screen-text + transcript —
-with a single LLM judge (Qwen3.5-9B locally, or gpt-4o via Azure Foundry), embedding-based
+with a single LLM judge (Qwen3.5-9B locally, or gpt-4o via Azure Foundry), within-block
 deduplication, and MoSCoW priority classification. The pipeline uploads the video to AVI,
 splits the indexed OCR + transcript into 20s chunks, has the judge LLM convert each chunk
 into requirement bullets, merges semantically equivalent bullets across time blocks,
@@ -27,7 +27,7 @@ Includes a FastAPI web UI with WebSocket progress streaming.
 - `utils.py` — Shared utilities: text cleaning (`strip_special_tokens`,
   `strip_think_blocks`, `clean_output`), spell-checking (`flag_unknown_words`,
   compound-word heuristics, domain-term whitelist), JSON extraction (`extract_balanced_json`,
-  brace-depth counting), embedding normalization (`normalize_embeddings`).
+  brace-depth counting).
 - `config_generator.py` — Judge-LLM inference pass (via the shared backend handle) that reads
   the final bullet list and writes `output/project_config.json` for docx generation. Accepts
   optional shared LLM handle to avoid redundant model loads.
@@ -59,15 +59,14 @@ Includes a FastAPI web UI with WebSocket progress streaming.
 - `models/` — `AVIProposer` cloud proposer (assembles OCR + transcript per chunk; no
   local model).
 - `judges/` — Single LLM refinement (`JudgesPanel`) with sequential evaluation, bullet
-  validation, and embedding-based dedup pipeline.
+  validation, and within-block dedup pipeline.
 - `judges/panel.py` — `JudgesPanel`: preload/load/evaluate/unload lifecycle for the single
   judge model (Qwen3.5-9B). Uses `extract_bullets` → `filter_meta_bullets` →
   `filter_truncated_bullets` → `filter_substrings` for output validation.
-- `judges/dedup.py` — Bullet deduplication via embedding prefilter (`all-MiniLM-L6-v2`
-  on CPU, no MLX GPU dependency) + LLM cluster resolution. Supports auto-accept skip for
-  high-cosine pairs (AUTO_ACCEPT_THRESHOLD=0.85) above the recall prefilter
-  (CANDIDATE_THRESHOLD=0.35). Used for cross-block dedup (per-bullet against a running
-  pool of accepted bullets, with LLM adjudication for ambiguous near-dupes).
+- `judges/dedup.py` — Within-block bullet deduplication via Jaccard prefilter
+  (CANDIDATE_THRESHOLD=0.40, pure Python, no embedding model) + LLM cluster resolution
+  and canonicalization. No cross-block pass — semantically equivalent bullets are
+  collapsed only within the same 20s time block.
 - `judges/priority.py` — Batched MoSCoW priority classification (M/S/C) via Qwen3-1.7B,
   15 bullets per LLM call. Accepts optional shared LLM handle. Defaults failed parses to
   "S" to avoid all-Must-Have bias.
@@ -135,9 +134,9 @@ BACKEND=foundry python main.py
 │  Azure       │    │  transcript)  │    │  transcript)     │    └──────┬───────┘
 └──────────────┘    └───────────────┘    └──────────────────┘            │
                                                                  ┌───────▼───────┐
-                                                                 │   Embedding   │
-                                                                 │  Dedup (CPU)  │
-                                                                 │  cross-block  │
+                                                                 │  Within-block │
+                                                                 │  Dedup (Jacc. │
+                                                                 │  + LLM)       │
                                                                  └───────┬───────┘
                                                                          │
                                                                  ┌───────▼───────┐
@@ -167,18 +166,18 @@ too). Set `BACKEND=hf` to use HuggingFace transformers + Pillow on any CUDA/MPS/
 Set `BACKEND=foundry` to route all text-LLM stages (judge, dedup resolution, MoSCoW
 priority, config gen) to a hosted Azure Foundry / Azure OpenAI endpoint (e.g. gpt-4o)
 via `FoundryBackend`; the proposer remains AVI, so no local GPU models load and only
-MiniLM embeddings (dedup) stay local on CPU.
+Qwen3-1.7B (dedup/priority/config) loads locally on CPU.
 Model ID mapping (`_MLX_TO_HF` in `backend.py`) translates `lmstudio-community`/`mlx-community`
 IDs to canonical HuggingFace repo IDs for cross-backend compatibility. Flash-attention 2
 auto-detected at import time.
 
 **Memory flow:** The AVI proposer is a cloud client (no local GPU model). The judge
-(Qwen3.5-9B, ~9GB) loads once in Stage 4. Embedding model runs on CPU (~80MB) so it
-never contends for the Metal GPU stream. Qwen3-1.7B (~1GB) loads once in Stage 5 and is
-**shared** across cross-block dedup, priority classification, and config generation
-(same handle, single load/unload cycle). Under `BACKEND=foundry` none of these local
-GPU models load — the judge/dedup/priority/config-gen LLM calls go to the hosted
-endpoint, and only MiniLM embeddings stay on CPU. Checkpoints are written incrementally
+(Qwen3.5-9B, ~9GB) loads once in Stage 4. Qwen3-1.7B (~1GB) loads once in Stage 5 and is
+**shared** across within-block dedup, priority classification, and config generation
+(same handle, single load/unload cycle). Dedup uses a pure-Python Jaccard prefilter (no
+embedding model), so nothing runs on the Metal GPU stream during Stage 5. Under
+`BACKEND=foundry` none of the local GPU models load — the judge/dedup/priority/config-gen
+LLM calls go to the hosted endpoint. Checkpoints are written incrementally
 (one line per chunk, JSONL) so the expensive proposer upload/index step can be skipped
 on re-run.
 
@@ -197,11 +196,11 @@ backoff from 2s). Located in `server/pipeline_runner.py`.
 `extract_bullets` → `filter_meta_bullets` → `filter_truncated_bullets` →
 `filter_substrings` (applied per-chunk inside `JudgesPanel._validate_bullets`)
 
-Cross-block dedup iterates each bullet against a running pool of previously-accepted
-bullets. Above `CANDIDATE_THRESHOLD=0.35` cosine similarity, the candidate and its
-near-neighbours are sent to `llm_resolve_clusters` which first splits auto-accept pairs
-(`AUTO_ACCEPT_THRESHOLD=0.85`, no LLM call) then adjudicates the ambiguous band via LLM.
-If the LLM confirms the new bullet is a duplicate, it is dropped.
+Within-block dedup runs per 20s time block: bullets above
+`CANDIDATE_THRESHOLD=0.40` Jaccard similarity are grouped by
+`cluster_candidates`, then `llm_resolve_clusters` asks the LLM to confirm true
+duplicates (conservative — same-topic is not enough) and returns one canonical
+bullet per confirmed group. No cross-block pass exists.
 
 **Priority classification:** Batched MoSCoW (M/S/C) via Qwen3-1.7B, 15 bullets per LLM
 call. Defaults failed/bad-parse entries to "S" (not "M") to avoid all-Must-Have bias.
@@ -223,7 +222,7 @@ No tests are implemented yet.
 - **Secrets:** No API keys or credentials in code. AVI tokens and Foundry keys come
   from `.env`.
 - **Dependency scanning:** `pip-audit` or `safety` recommended before deployment.
-- **Model weights:** Downloaded from Hugging Face Hub via `mlx-lm` / `sentence-transformers`
+- **Model weights:** Downloaded from Hugging Face Hub via `mlx-lm`
   (`mlx-vlm` only when the unified VLM-as-LLM judge path is used). Verify model IDs in
   `config.py` before use.
 - **License:** MIT. Node.js `docx` package is MIT-licensed.
@@ -255,12 +254,12 @@ No tests are implemented yet.
   `_VLM_BACKED_TEXT_MODELS`. Models needing `/no_think` append must be added to
   `_NO_THINK_MODELS` in `backend.py`.
 - **Chunking:** Adjust `CHUNK_SIZE_SEC` in `config.py`.
-- **Deduplication:** Tune `CANDIDATE_THRESHOLD` (recall prefilter) and
-  `AUTO_ACCEPT_THRESHOLD` (auto-merge ceiling) in `judges/dedup.py`.
+- **Deduplication:** Tune `CANDIDATE_THRESHOLD` (recall prefilter) in
+  `judges/dedup.py`.
 - **Prompts:** Edit `AVI_JUDGE_SYSTEM`, `AVI_RAW_TEMPLATE`, `JUDGE_SYSTEM`, etc. in `config.py`.
 - **Judge count:** The panel now uses a single judge. To add multiple judges, extend
   `JudgesPanel.load_all()` and `evaluate()` in `judges/panel.py` and re-introduce a
-  merger step (embedding dedup handles N inputs).
+  merger step (Jaccard-prefiltered LLM dedup handles N inputs).
 - **Priority:** Adjust `batch_size` in `classify_priorities()`, or modify the
   `_PRIORITY_SYSTEM` prompt in `judges/priority.py`.
 - **Spell check:** Edit domain terms in `_get_spellchecker()` or suffix list in
@@ -279,7 +278,7 @@ No tests are implemented yet.
 - `config.py` — all tunable parameters in one file.
 - `backend.py` — inference backend abstraction, three implementations, model ID mapping,
   unified VLM-as-LLM support, `/no_think` model handling.
-- `utils.py` — shared text cleaning, spell checking, JSON extraction, embedding helpers.
+- `utils.py` — shared text cleaning, spell checking, JSON extraction.
 - `server/pipeline_runner.py` — complete 7-stage pipeline implementation.
 - `server/app.py` — FastAPI REST + WebSocket API.
 - `static/app.js` — frontend SPA with WebSocket progress streaming.

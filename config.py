@@ -57,8 +57,6 @@ DEDUP = ModelSpec(
 
 ALL_MODELS = [JUDGE, DEDUP]
 
-ENCODER_MODEL = "all-MiniLM-L6-v2"
-
 # Backwards-compat aliases — keep consumer imports unchanged. Each maps to a
 # single registry entry so renaming a model is a one-line change above.
 JUDGE_MODEL = JUDGE.mlx_id

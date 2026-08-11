@@ -42,7 +42,6 @@ from data_prep.avi import get_valid_avi_chunks, load_avi_chunks
 from judges import JudgesPanel
 from judges.dedup import (
     dedup_bullets_llm,
-    dedup_cross_block,
     extract_bullets,
 )
 from judges.priority import classify_priorities
@@ -411,7 +410,7 @@ class PipelineRunner:
                                     1.0, elapsed=judges_elapsed))
 
         # ── STAGE 5+6: POST-PROCESSING, PRIORITIES, CONFIG ──
-        dedup_removed, all_bullets = self._run_post_processing(
+        all_bullets = self._run_post_processing(
             refined, backend, judges_elapsed, inference_elapsed, cb
         )
 
@@ -481,7 +480,7 @@ class PipelineRunner:
 
     def _dump_json(
         self, refined: list, inference_elapsed: float,
-        judges_elapsed: float, dedup_removed: int = 0,
+        judges_elapsed: float,
         priorities: list[str] | None = None,
         extracted: tuple[list[list[str]], list[str]] | None = None,
         token_usage: dict | None = None,
@@ -494,7 +493,6 @@ class PipelineRunner:
         summary = {
             "total_chunks": len(refined),
             "successfully_refined": successful,
-            "duplicate_bullets_removed_cross_block": dedup_removed,
             "inference_time_sec": round(inference_elapsed, 1),
             "judges_time_sec": round(judges_elapsed, 1),
             "total_time_sec": round(total, 1),
@@ -513,9 +511,8 @@ class PipelineRunner:
         """Deduplicate semantically-equivalent bullets within each time block.
 
         The judge panel already applies a substring filter per chunk; this adds
-        an embedding+LLM pass so near-duplicate wording in the SAME block is
-        collapsed too (cross-block dedup only compares across blocks). Returns a
-        new list — never mutates the input.
+        a Jaccard+LLM pass so near-duplicate wording in the SAME block is
+        collapsed too. Returns a new list — never mutates the input.
         """
         updated: list[dict] = []
         for req in refined:
@@ -538,8 +535,7 @@ class PipelineRunner:
     def _run_post_processing(
         self, refined: list, backend, judges_elapsed: float,
         inference_elapsed: float, cb: Callback | None = None,
-    ) -> tuple[int, list[str]]:
-        dedup_removed = 0
+    ) -> list[str]:
         all_bullets: list[str] = []
 
         self._emit(cb, StageUpdate(5, "Post-processing", "running",
@@ -555,17 +551,10 @@ class PipelineRunner:
         if judge3_handle is not None:
             try:
                 self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                            "Within-block deduplication...", 0.05))
+                                            "Within-block deduplication...", 0.1))
                 with backend.usage.stage("stage5_dedup"):
                     refined = self._dedup_within_blocks(
                         refined, backend, judge3_handle
-                    )
-
-                self._emit(cb, StageUpdate(5, "Post-processing", "running",
-                                            "Cross-block deduplication...", 0.1))
-                with backend.usage.stage("stage5_dedup"):
-                    refined, dedup_removed = dedup_cross_block(
-                        refined, backend=backend, llm_handle=judge3_handle
                     )
 
                 extracted = self._extract_bullets(refined)
@@ -582,7 +571,7 @@ class PipelineRunner:
                     priorities = ["S"] * len(all_bullets)
 
                 self._dump_json(refined, inference_elapsed, judges_elapsed,
-                                dedup_removed, priorities=priorities,
+                                priorities=priorities,
                                 extracted=extracted,
                                 token_usage=backend.usage.summary())
 
@@ -612,10 +601,9 @@ class PipelineRunner:
             )
 
         self._emit(cb, StageUpdate(5, "Post-processing", "done",
-                                    f"Removed {dedup_removed} dupes, "
                                     f"{len(all_bullets)} requirements",
                                     1.0, elapsed=0))
-        return dedup_removed, all_bullets
+        return all_bullets
 
     def _generate_docx(self) -> None:
         if not os.path.exists(self._config_file):
