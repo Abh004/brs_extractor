@@ -107,6 +107,7 @@ AVI_MAX_RETRIES = 3
 AVI_CONNECT_TIMEOUT = 30
 AVI_READ_TIMEOUT = 180
 AVI_RETRY_BACKOFF = 2.0
+AVI_UPLOAD_TIMEOUT_SEC = 900  # generous read timeout for large video uploads
 
 # Env vars consumed by avi.py (loaded via python-dotenv):
 #   AZURE_VIDEO_INDEXER_LOCATION        e.g. "trial" or a region like "eastus"

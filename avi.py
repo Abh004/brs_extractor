@@ -44,6 +44,7 @@ from config import (
     AVI_READ_TIMEOUT,
     AVI_RETRY_BACKOFF,
     AVI_UPLOAD_NAME,
+    AVI_UPLOAD_TIMEOUT_SEC,
 )
 
 
@@ -301,67 +302,121 @@ def _request(
     return resp.json()
 
 
-def upload_and_index(
-    video_path: str,
-    name: str = AVI_UPLOAD_NAME,
-    language: str = AVI_LANGUAGE,
-    output_dir: str = "output",
-    index_file: str = AVI_INDEX_FILE,
-) -> dict:
-    """
-    Upload a video to AVI, wait for it to finish indexing, and return the
-    parsed index JSON. Result is cached to {output_dir}/{index_file} and
-    reused on re-runs for the SAME video (matched by mtime+size), so a
-    changed/uploaded video is re-indexed rather than served stale.
-    """
-    location = _env("AZURE_VIDEO_INDEXER_LOCATION")
-    account_id = _env("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
-    base = _account_url(location, account_id)
+def _upload_marker_path(output_dir: str) -> str:
+    """Path of the file recording videoIds of uploads started by this tool."""
+    return os.path.join(output_dir, "avi_upload.json")
 
-    os.makedirs(output_dir, exist_ok=True)
-    cache_path = os.path.join(output_dir, index_file)
-    marker_path = cache_path + ".marker"
 
-    # Reuse a cached index if present AND it belongs to the same source video.
-    if os.path.exists(cache_path) and os.path.exists(marker_path):
-        if _marker_matches(marker_path, video_path):
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached:
-                print(f"  [AVI] Reusing cached index: {cache_path}")
-                return cached
-        else:
-            print("  [AVI] Source video changed; re-indexing (discarding stale cache).")
-
-    # Upload (streaming multipart via requests).
-    name_enc = urllib.parse.quote(name)
-    upload_url = f"{base}/Videos/{name_enc}?language={urllib.parse.quote(language)}"
-    upload_url = _append_access_token(upload_url)
-    print(f"  [AVI] Uploading '{os.path.basename(video_path)}' as '{name}'...")
-    upload_headers = _authed({})
+def _read_upload_marker(output_dir: str) -> dict:
     try:
-        with open(video_path, "rb") as fobj:
-            resp = _session().post(
-                upload_url,
-                headers=upload_headers,
-                files={
-                    "file": (
-                        os.path.basename(video_path),
-                        fobj,
-                        "application/octet-stream",
-                    )
-                },
-                timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
-                verify=_verify(),
-            )
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(
-            f"AVI upload failed: {e}. Check your VPN/proxy/firewall, or "
-            f"set AVI_NO_PROXY=1 to bypass the proxy."
-        ) from e
+        with open(_upload_marker_path(output_dir), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return {}
+
+
+def _write_upload_marker(output_dir: str, source: str, video_id: str, name: str) -> None:
+    data = _read_upload_marker(output_dir)
+    data[source] = {"video_id": video_id, "name": name}
+    with open(_upload_marker_path(output_dir), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _videos_by_name(base: str, name: str) -> list[dict]:
+    """List account videos and return those whose name matches exactly."""
+    data = _request("GET", f"{base}/Videos", _authed())
+    items = data if isinstance(data, list) else (data or {}).get("results") or []
+    if not isinstance(items, list):
+        return []
+    return [v for v in items if isinstance(v, dict) and v.get("name") == name]
+
+
+def _fetch_index(base: str, video_id: str, language: str) -> dict:
+    """Return the index dict for an already-uploaded video."""
+    url = f"{base}/Videos/{video_id}/Index?language={urllib.parse.quote(language)}"
+    return _request("GET", url, _authed())
+
+
+def _save_index(cache_path: str, marker_path: str, state: dict, video_path: str) -> None:
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write(_source_identity(video_path))
+    print(f"  [AVI] index saved: {cache_path}")
+
+
+def _upload_video(
+    base: str,
+    video_path: str,
+    name: str,
+    language: str,
+    output_dir: str,
+    source: str,
+) -> str:
+    """Upload a video file (streaming multipart) with retry/backoff.
+
+    urllib3 won't retry a connection that fails while the request body is being
+    written (it can't know how much the server received), so we retry the whole
+    upload ourselves. On a "video already exists" rejection, we reuse the
+    existing videoId instead of failing. Returns the videoId.
+    """
+    name_enc = urllib.parse.quote(name)
+    upload_url = (
+        f"{base}/Videos?name={name_enc}&language={urllib.parse.quote(language)}"
+    )
+    upload_url = _append_access_token(upload_url)
+    upload_headers = _authed({})
+    upload_headers.pop("Content-Type", None)  # let requests set multipart boundary
+    attempts = AVI_MAX_RETRIES + 1
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        print(
+            f"  [AVI] Uploading '{os.path.basename(video_path)}' as '{name}' "
+            f"(attempt {attempt}/{attempts})..."
+        )
+        try:
+            with open(video_path, "rb") as fobj:
+                resp = _session().post(
+                    upload_url,
+                    headers=upload_headers,
+                    files={
+                        "file": (
+                            os.path.basename(video_path),
+                            fobj,
+                            "application/octet-stream",
+                        )
+                    },
+                    timeout=(AVI_CONNECT_TIMEOUT, AVI_UPLOAD_TIMEOUT_SEC),
+                    verify=_verify(),
+                )
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            if attempt < attempts:
+                delay = AVI_RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"  [AVI] upload interrupted ({e}); retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(
+                f"AVI upload failed after {attempts} attempts: {last_err}. "
+                f"Check your VPN/proxy/firewall, or set AVI_NO_PROXY=1 to "
+                f"bypass the proxy."
+            ) from last_err
+        break
     if resp.status_code >= 400:
         display_url = _redact_url(upload_url)
         _diagnose("POST", upload_url, resp)
+        text = (resp.text or "").lower()
+        if resp.status_code in (400, 409) and any(
+            token in text for token in ("exist", "conflict", "duplicate")
+        ):
+            existing = _videos_by_name(base, name)
+            if existing and existing[0].get("id"):
+                vid = existing[0]["id"]
+                print(
+                    f"  [AVI] Upload rejected ({resp.status_code}); video "
+                    f"'{name}' already exists — reusing id {vid}."
+                )
+                return vid
         raise RuntimeError(
             f"AVI HTTP {resp.status_code} POST {display_url} -> {resp.text[:500]}"
         )
@@ -370,8 +425,12 @@ def upload_and_index(
     if not video_id:
         raise RuntimeError(f"AVI upload returned no video ID: {result}")
     print(f"  [AVI] videoId: {video_id} | status: {result.get('state')}")
+    _write_upload_marker(output_dir, source, video_id, name)
+    return video_id
 
-    # Poll until processed.
+
+def _wait_for_index(base: str, video_id: str, language: str) -> dict:
+    """Poll AVI until the video is indexed (Processed) or fails."""
     index_url = (
         f"{base}/Videos/{video_id}/Index?"
         f"language={urllib.parse.quote(language)}"
@@ -387,17 +446,103 @@ def upload_and_index(
         videos = state.get("videos") if isinstance(state, dict) else None
         video_state = videos[0].get("state") if videos else None
         if video_state == "Processed":
-            break
+            return state
         if video_state == "Failed":
             raise RuntimeError(f"AVI indexing failed for video {video_id}: {state}")
-        print(f"  [AVI] indexing state: {video_state}. retrying in {AVI_POLL_INTERVAL_SEC}s...")
+        print(
+            f"  [AVI] indexing state: {video_state}. retrying in "
+            f"{AVI_POLL_INTERVAL_SEC}s..."
+        )
         time.sleep(AVI_POLL_INTERVAL_SEC)
 
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-    with open(marker_path, "w", encoding="utf-8") as f:
-        f.write(_source_identity(video_path))
-    print(f"  [AVI] index saved: {cache_path}")
+
+def upload_and_index(
+    video_path: str,
+    name: str = AVI_UPLOAD_NAME,
+    language: str = AVI_LANGUAGE,
+    output_dir: str = "output",
+    index_file: str = AVI_INDEX_FILE,
+) -> dict:
+    """
+    Upload a video to AVI, wait for it to finish indexing, and return the
+    parsed index JSON.
+
+    Avoids redundant uploads in this order:
+      1. Reuse a cached index for the same source video.
+      2. Reuse an EXISTING, fully-processed account video with the same name.
+      3. Resume a videoId this tool uploaded earlier (marker file) that is
+         still processing.
+      4. Upload a fresh copy (retried with backoff for mid-stream aborts) and
+         persist its videoId so an interrupted run never re-streams the file.
+    """
+    location = _env("AZURE_VIDEO_INDEXER_LOCATION")
+    account_id = _env("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
+    base = _account_url(location, account_id)
+
+    os.makedirs(output_dir, exist_ok=True)
+    cache_path = os.path.join(output_dir, index_file)
+    marker_path = cache_path + ".marker"
+    source = _source_identity(video_path)
+
+    # 1. Reuse a cached index if present AND it belongs to the same source video.
+    if os.path.exists(cache_path) and os.path.exists(marker_path):
+        if _marker_matches(marker_path, video_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached:
+                print(f"  [AVI] Reusing cached index: {cache_path}")
+                return cached
+        else:
+            print("  [AVI] Source video changed; re-indexing (discarding stale cache).")
+
+    # 2. Reuse an existing, fully-processed account video with the same name.
+    existing = _videos_by_name(base, name)
+    if existing:
+        match = existing[0]
+        state_code = match.get("state")
+        if state_code == "Processed":
+            print(
+                f"  [AVI] Found existing processed video '{name}' "
+                f"({match.get('id')}); reusing it."
+            )
+            state = _fetch_index(base, match["id"], language)
+            _save_index(cache_path, marker_path, state, video_path)
+            return state
+        print(
+            f"  [AVI] Found existing video '{name}' but it is {state_code}; "
+            f"only Processed videos are reused — continuing."
+        )
+
+    # 3. Resume a videoId this tool uploaded earlier (still processing), or
+    #    upload a fresh copy.
+    video_id = None
+    own = _read_upload_marker(output_dir).get(source)
+    if own and own.get("video_id"):
+        vid = own["video_id"]
+        try:
+            probe = _fetch_index(base, vid, language)
+            videos = probe.get("videos") if isinstance(probe, dict) else None
+            st = videos[0].get("state") if videos else None
+        except RuntimeError:
+            st = None
+        if st == "Processed":
+            print(
+                f"  [AVI] Previously uploaded video {vid} finished processing; "
+                f"reusing it."
+            )
+            _save_index(cache_path, marker_path, probe, video_path)
+            return probe
+        if st in ("Processing", "Uploaded"):
+            print(
+                f"  [AVI] Resuming indexing for previously uploaded video "
+                f"{vid} (state: {st})."
+            )
+            video_id = vid
+    if video_id is None:
+        video_id = _upload_video(base, video_path, name, language, output_dir, source)
+
+    state = _wait_for_index(base, video_id, language)
+    _save_index(cache_path, marker_path, state, video_path)
     return state
 
 
