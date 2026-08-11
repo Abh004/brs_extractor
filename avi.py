@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
 import urllib.parse
@@ -554,6 +555,42 @@ def _insights(index: dict) -> dict:
     return videos[0].get("insights") or {}
 
 
+# ISO-8601 duration, e.g. "PT12.5S", "PT1M30.5S", "PT1H2M3S"
+_DURATION = re.compile(r"^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?([\d.]+)S$")
+
+
+def _parse_seconds(value: Any) -> float | None:
+    """
+    Coerce an AVI timestamp to float seconds, or None if unparseable.
+
+    AVI index JSON sometimes returns start/end as numeric seconds and sometimes
+    as strings ("12.5" or an ISO-8601 duration "PT12.5S"). Normalising at this
+    boundary lets every downstream consumer (chunk bucketing, timestamped
+    display) treat timestamps as float-or-None without its own guards.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    m = _DURATION.fullmatch(s)
+    if m:
+        days, hours, mins, secs = m.groups()
+        return (
+            float(days or 0) * 86400
+            + float(hours or 0) * 3600
+            + float(mins or 0) * 60
+            + float(secs or 0)
+        )
+    return None
+
+
 def _segs(items: list | None) -> list[dict]:
     """Normalise AVI insights items (with start/end) to a compact list."""
     if not items:
@@ -565,7 +602,11 @@ def _segs(items: list | None) -> list[dict]:
         text = it.get("text") or ""
         if not text:
             continue
-        out.append({"start": start, "end": end, "text": text})
+        out.append({
+            "start": _parse_seconds(start),
+            "end": _parse_seconds(end),
+            "text": text,
+        })
     return out
 
 
@@ -595,8 +636,8 @@ def get_ocr_spatial(index: dict) -> list[dict]:
             continue
         inst = (it.get("instances") or [{}])
         inst = inst[0] if isinstance(inst, list) and inst else {}
-        start = inst.get("start", it.get("start"))
-        end = inst.get("end", it.get("end"))
+        start = _parse_seconds(inst.get("start", it.get("start")))
+        end = _parse_seconds(inst.get("end", it.get("end")))
         out.append({
             "start": start,
             "end": end,
