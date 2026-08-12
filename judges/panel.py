@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from backend import InferenceBackend, get_backend
 from config import (
-    AVI_JUDGE_MAX_BULLETS,
     AVI_JUDGE_SYSTEM,
     JUDGE_MAX_TOKENS,
     JUDGE_MODEL,
@@ -16,12 +15,11 @@ from judges.dedup import (
 )
 
 
-def _validate_bullets(text: str, max_bullets: int = AVI_JUDGE_MAX_BULLETS) -> str:
+def _validate_bullets(text: str) -> str:
     bullets = extract_bullets(text)
     bullets = filter_meta_bullets(bullets)
     bullets = filter_truncated_bullets(bullets)
     bullets = filter_substrings(bullets)  # catch within-chunk near-dupes too
-    bullets = bullets[:max_bullets]
     return "\n".join(f"- {b}" for b in bullets) if bullets else ""
 
 

@@ -73,7 +73,6 @@ REPETITION_CONTEXT_SIZE = 20
 
 # Per-stage inference budgets
 JUDGE_MAX_TOKENS = 150
-JUDGE_MAX_BULLETS = 5
 PRIORITY_BATCH_SIZE = 15
 PRIORITY_MAX_TOKENS = 120
 DEDUP_MAX_TOKENS = 500
@@ -125,10 +124,6 @@ FOUNDRY_CONNECT_TIMEOUT = 30
 FOUNDRY_READ_TIMEOUT = 180
 FOUNDRY_RETRY_BACKOFF = 2.0
 
-# AVI proposer → judge: how many requirement bullets the judge should emit
-# per 20s chunk from the OCR screen-text + transcript context.
-AVI_JUDGE_MAX_BULLETS = 8
-
 # ── Prompts ─────────────────────────────────────────────────────────────
 # The AVI judge reads RAW OCR (on-screen UI text) + transcript for a chunk
 # and EMITS "The system shall ..." bullets — the job the local frame-based
@@ -154,7 +149,6 @@ AVI_JUDGE_SYSTEM = (
     "- Only report UI and layout that the OCR text and positions actually show; "
     "do not invent controls that are not present.\n"
     "- Drop duplication and generic statements. No preamble, plain text only.\n"
-    f"Maximum {AVI_JUDGE_MAX_BULLETS} bullets."
 )
 
 # Compose the per-chunk raw context the AVI judge consumes. Kept here so the
@@ -181,5 +175,5 @@ JUDGE_SYSTEM = (
     "as given rather than inferring what it might mean.\n"
     "- Rewrite vague or infeasible items as realistic, testable technical "
     "constraints instead of deleting them outright.\n"
-    "No preamble, plain text only. Maximum 5 bullets."
+    "No preamble, plain text only."
 )
