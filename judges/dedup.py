@@ -107,6 +107,10 @@ def filter_substrings(bullets: list[str]) -> list[str]:
 
     The longer bullet is always kept; the shorter substring is dropped.
     When two bullets are mutual substrings (identical), the first is kept.
+
+    Order-preserving: survivors keep their original relative order. The
+    substring check runs over a length-sorted view, but the result is
+    returned in the order the bullets were given.
     """
     if len(bullets) <= 1:
         return bullets
@@ -116,13 +120,15 @@ def filter_substrings(bullets: list[str]) -> list[str]:
 
     indexed = sorted(
         [(i, _norm(b)) for i, b in enumerate(bullets)],
-        key=lambda x: -len(x[1]),
+        key=lambda x: (-len(x[1]), x[0]),
     )
-    kept: list[tuple[int, str]] = []
+    kept_norms: list[str] = []
+    kept_indices: set[int] = set()
     for idx, norm in indexed:
-        if not any(norm in other_norm for _, other_norm in kept):
-            kept.append((idx, norm))
-    return [bullets[i] for i, _ in kept]
+        if not any(norm in other_norm for other_norm in kept_norms):
+            kept_norms.append(norm)
+            kept_indices.add(idx)
+    return [b for i, b in enumerate(bullets) if i in kept_indices]
 
 
 # Candidate clustering (Jaccard prefilter — recall, not precision)

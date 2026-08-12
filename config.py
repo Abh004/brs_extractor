@@ -227,6 +227,8 @@ AVI_SINGLE_PASS_SYSTEM = (
     "- If the same capability or feature recurs at several timestamps across "
     "the video, describe it ONCE (consolidating the recurrences into a single "
     "bullet); do not restate the same requirement per timestamp.\n"
+    "- Order your bullets chronologically: list them by the time each "
+    "capability FIRST appears in the video, earliest first.\n"
     "- Drop duplication and generic statements. No preamble, plain text only. "
     "Use timestamped, fact-based bullet points.\n"
 )
@@ -246,5 +248,7 @@ JUDGE_SYSTEM = (
     "as given rather than inferring what it might mean.\n"
     "- Rewrite vague or infeasible items as realistic, testable technical "
     "constraints instead of deleting them outright.\n"
+    "- Order your bullets by the order the features first appear in the input, "
+    "earliest first.\n"
     "No preamble, plain text only."
 )
