@@ -29,16 +29,27 @@ from typing import Callable
 from backend import check_hf_reachable, get_backend, print_hf_unreachable_warning
 from config import (
     AVI_INDEX_FILE,
+    AVI_JUDGE_SYSTEM,
+    AVI_RAW_TEMPLATE,
+    AVI_SINGLE_PASS,
+    AVI_SINGLE_PASS_SYSTEM,
     CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
     CONFIG_FILE,
     DEDUP_MODEL,
     DOCX_FILE,
     OUTPUT_FILE,
+    SINGLE_PASS_INPUT_TOKEN_CAP,
+    SINGLE_PASS_JUDGE_MAX_TOKENS,
+    SINGLE_PASS_MAX_BULLETS,
 )
 import avi as avi_client
 from config_generator import generate_config
-from data_prep.avi import get_valid_avi_chunks, load_avi_chunks
+from data_prep.avi import (
+    build_avi_single_pass_chunk,
+    get_valid_avi_chunks,
+    load_avi_chunks,
+)
 from judges import JudgesPanel
 from judges.dedup import (
     dedup_bullets_llm,
@@ -117,6 +128,11 @@ def _is_empty_output(text: str | None) -> bool:
         return len(text.strip()) < 10
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate (word count * 1.3) for input-budget guards."""
+    return max(1, int(len(text.split()) * 1.3))
+
+
 def _load_checkpoint(checkpoint_file: str) -> list | None:
     if not os.path.exists(checkpoint_file):
         return None
@@ -159,6 +175,10 @@ class PipelineRunner:
 
         self._cancel_requested = False
         self._log_lines: list[str] = []
+
+        self._single_pass = AVI_SINGLE_PASS
+        self._index: dict | None = None
+        self._full_chunk: dict | None = None
 
     def cancel(self):
         self._cancel_requested = True
@@ -237,10 +257,34 @@ class PipelineRunner:
 
         self._emit(cb, StageUpdate(1, "Azure Video Indexer", "running",
                                     "Chunking AVI transcript + OCR...", 0.9))
+        self._index = index
         chunks = load_avi_chunks(index)
         valid_chunks = get_valid_avi_chunks(chunks)
+
+        if self._single_pass:
+            full_chunk = build_avi_single_pass_chunk(index)
+            context = AVI_RAW_TEMPLATE.format(
+                screen_text="\n".join(full_chunk["ocr_lines"]) or "(no on-screen text)",
+                transcript="\n".join(full_chunk["text_lines"]) or "(no speech)",
+            )
+            estimated = _estimate_tokens(context)
+            if estimated > SINGLE_PASS_INPUT_TOKEN_CAP:
+                print(
+                    f"  [single-pass] context ~{estimated} tokens exceeds cap "
+                    f"({SINGLE_PASS_INPUT_TOKEN_CAP}); falling back to chunking."
+                )
+                self._single_pass = False
+            else:
+                self._full_chunk = full_chunk
+                print(f"  [single-pass] entire video context ~{estimated} tokens")
+
+        mode_msg = (
+            "Prepared entire video as one pass"
+            if self._single_pass
+            else f"Prepared {len(valid_chunks)} chunks from AVI"
+        )
         self._emit(cb, StageUpdate(1, "Azure Video Indexer", "done",
-                                    f"Prepared {len(valid_chunks)} chunks from AVI",
+                                    mode_msg,
                                     1.0, elapsed=time.time() - stage1_start))
 
         # ── STAGE 2: MODEL INITIALIZATION ──
@@ -268,7 +312,12 @@ class PipelineRunner:
 
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",
                                    "Validating judge models...", 0.6))
-        judges_panel = JudgesPanel(backend=backend)
+        judges_panel = JudgesPanel(
+            backend=backend,
+            system_prompt=(
+                AVI_SINGLE_PASS_SYSTEM if self._single_pass else AVI_JUDGE_SYSTEM
+            ),
+        )
         try:
             judges_panel.preload()
         except Exception as e:
@@ -283,68 +332,101 @@ class PipelineRunner:
 
         # ── STAGE 3: PROPOSAL (Azure Video Indexer context) ──
         self._emit(cb, StageUpdate(3, "Proposal", "running",
-                                   f"Building {len(valid_chunks)} chunk contexts...", 0.0))
+                                   (
+                                       "Building whole-video context..."
+                                       if self._single_pass
+                                       else f"Building {len(valid_chunks)} chunk contexts..."
+                                   ), 0.0))
         stage3_start = time.time()
 
         checkpointed = _load_checkpoint(self._checkpoint_file)
-        done_indices = (
-            {c["minute_block"] for c in checkpointed} if checkpointed else set()
-        )
-        remaining_chunks = [
-            (bucket_index, chunk_data)
-            for bucket_index, chunk_data in valid_chunks
-            if bucket_index not in done_indices
-        ]
         all_extracted = list(checkpointed) if checkpointed else []
 
-        if not remaining_chunks:
-            self._emit(cb, StageUpdate(3, "Proposal", "skipped",
-                                        "All chunks in checkpoint", 1.0,
-                                        elapsed=time.time() - stage3_start))
-        else:
-            resume_info = (
-                f"Resuming: {len(done_indices)}/{len(valid_chunks)} done, "
-                f"{len(remaining_chunks)} remaining"
-                if checkpointed else None
-            )
-            if resume_info:
-                self._emit(cb, StageUpdate(3, "Proposal", "running",
-                                            resume_info, 0.0))
-
-            for i, (bucket_index, chunk_data) in enumerate(remaining_chunks, 1):
-                self._check_cancelled()
-
-                label = f"Chunk {bucket_index + 1} [{i}/{len(remaining_chunks)}]"
-
+        if self._single_pass:
+            if checkpointed:
+                self._emit(cb, StageUpdate(3, "Proposal", "skipped",
+                                            "Single-pass chunk in checkpoint", 1.0,
+                                            elapsed=time.time() - stage3_start))
+            else:
+                label = "Single-pass whole-video proposal"
                 t = time.time()
                 try:
-                    response = proposer.generate(chunk_data)
+                    response = proposer.generate(self._full_chunk)
                     elapsed = time.time() - t
                 except Exception as e:
                     elapsed = time.time() - t
                     print(f"    {label} failed: {e}")
                     response = None
-
+                duration = self._video_duration_seconds()
                 chunk_record = {
-                    "minute_block": bucket_index,
-                    "time_range": (
-                        f"{bucket_index * CHUNK_SIZE_SEC}s - "
-                        f"{(bucket_index + 1) * CHUNK_SIZE_SEC}s"
-                    ),
+                    "minute_block": 0,
+                    "time_range": f"0s - {duration:.0f}s",
                     "raw_model_output": response,
                 }
                 all_extracted.append(chunk_record)
                 _append_checkpoint(chunk_record, self._checkpoint_file)
+                inference_elapsed = time.time() - stage3_start
+                self._emit(cb, StageUpdate(3, "Proposal", "done",
+                                            f"Prepared entire video ({elapsed:.1f}s)",
+                                            1.0, elapsed=inference_elapsed))
+        else:
+            done_indices = (
+                {c["minute_block"] for c in checkpointed} if checkpointed else set()
+            )
+            remaining_chunks = [
+                (bucket_index, chunk_data)
+                for bucket_index, chunk_data in valid_chunks
+                if bucket_index not in done_indices
+            ]
 
-                progress = i / len(remaining_chunks)
-                msg = f"Chunk {bucket_index + 1}/{len(valid_chunks)} ({elapsed:.1f}s)"
-                self._emit(cb, StageUpdate(3, "Proposal", "running",
-                                            msg, progress))
+            if not remaining_chunks:
+                self._emit(cb, StageUpdate(3, "Proposal", "skipped",
+                                            "All chunks in checkpoint", 1.0,
+                                            elapsed=time.time() - stage3_start))
+            else:
+                resume_info = (
+                    f"Resuming: {len(done_indices)}/{len(valid_chunks)} done, "
+                    f"{len(remaining_chunks)} remaining"
+                    if checkpointed else None
+                )
+                if resume_info:
+                    self._emit(cb, StageUpdate(3, "Proposal", "running",
+                                                resume_info, 0.0))
 
-            inference_elapsed = time.time() - stage3_start
-            self._emit(cb, StageUpdate(3, "Proposal", "done",
-                                        f"Prepared {len(remaining_chunks)} chunks",
-                                        1.0, elapsed=inference_elapsed))
+                for i, (bucket_index, chunk_data) in enumerate(remaining_chunks, 1):
+                    self._check_cancelled()
+
+                    label = f"Chunk {bucket_index + 1} [{i}/{len(remaining_chunks)}]"
+
+                    t = time.time()
+                    try:
+                        response = proposer.generate(chunk_data)
+                        elapsed = time.time() - t
+                    except Exception as e:
+                        elapsed = time.time() - t
+                        print(f"    {label} failed: {e}")
+                        response = None
+
+                    chunk_record = {
+                        "minute_block": bucket_index,
+                        "time_range": (
+                            f"{bucket_index * CHUNK_SIZE_SEC}s - "
+                            f"{(bucket_index + 1) * CHUNK_SIZE_SEC}s"
+                        ),
+                        "raw_model_output": response,
+                    }
+                    all_extracted.append(chunk_record)
+                    _append_checkpoint(chunk_record, self._checkpoint_file)
+
+                    progress = i / len(remaining_chunks)
+                    msg = f"Chunk {bucket_index + 1}/{len(valid_chunks)} ({elapsed:.1f}s)"
+                    self._emit(cb, StageUpdate(3, "Proposal", "running",
+                                                msg, progress))
+
+                inference_elapsed = time.time() - stage3_start
+                self._emit(cb, StageUpdate(3, "Proposal", "done",
+                                            f"Prepared {len(remaining_chunks)} chunks",
+                                            1.0, elapsed=inference_elapsed))
 
         # ── STAGE 4: JUDGES REFINEMENT ──
         self._emit(cb, StageUpdate(4, "Judges Refinement", "running",
@@ -374,9 +456,14 @@ class PipelineRunner:
             label = f"Judge eval chunk {req['minute_block'] + 1}"
             try:
                 raw_output = req["raw_model_output"]
+                judge_max_tokens = (
+                    SINGLE_PASS_JUDGE_MAX_TOKENS if self._single_pass else None
+                )
                 with backend.usage.stage("stage4_judge"):
                     output = _with_retry(
-                        fn=lambda ro=raw_output: judges_panel.evaluate(ro),
+                        fn=lambda ro=raw_output: judges_panel.evaluate(
+                            ro, max_tokens=judge_max_tokens
+                        ),
                         max_retries=_JUDGE_MAX_RETRIES,
                         label=label,
                     )
@@ -507,12 +594,31 @@ class PipelineRunner:
             json.dump(output, f, indent=2, ensure_ascii=False)
         return all_bullets
 
-    def _dedup_within_blocks(self, refined: list, backend, llm_handle) -> list:
+    def _video_duration_seconds(self) -> float:
+        """Max end-timestamp across the whole index (for the single-block range)."""
+        duration = 0.0
+        for seg in (
+            avi_client.get_transcript(self._index)
+            + avi_client.get_ocr_spatial(self._index)
+        ):
+            end = seg.get("end")
+            if isinstance(end, (int, float)):
+                duration = max(duration, end)
+        return duration
+
+    def _dedup_within_blocks(self, refined: list, backend, llm_handle,
+                             max_bullets: int | None = None) -> list:
         """Deduplicate semantically-equivalent bullets within each time block.
 
         The judge panel already applies a substring filter per chunk; this adds
         a Jaccard+LLM pass so near-duplicate wording in the SAME block is
         collapsed too. Returns a new list — never mutates the input.
+
+        Args:
+            max_bullets: Optional cap applied to each block's bullet list
+                         BEFORE dedup, so the O(n^2) Jaccard prefilter and the
+                         per-cluster LLM calls stay bounded (single-pass mode
+                         produces one whole-video block).
         """
         updated: list[dict] = []
         for req in refined:
@@ -524,6 +630,8 @@ class PipelineRunner:
             if not bullets:
                 updated.append(req)
                 continue
+            if max_bullets:
+                bullets = bullets[:max_bullets]
             deduped = dedup_bullets_llm(bullets, backend, llm_handle)
             new_req = dict(req)
             new_req["refined_requirements"] = (
@@ -554,7 +662,10 @@ class PipelineRunner:
                                             "Within-block deduplication...", 0.1))
                 with backend.usage.stage("stage5_dedup"):
                     refined = self._dedup_within_blocks(
-                        refined, backend, judge3_handle
+                        refined, backend, judge3_handle,
+                        max_bullets=(
+                            SINGLE_PASS_MAX_BULLETS if self._single_pass else None
+                        ),
                     )
 
                 extracted = self._extract_bullets(refined)

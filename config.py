@@ -7,6 +7,7 @@ module — backend.py, models/, judges/, config_generator.py — derives its
 model references from here, so renaming a model is a single-line change.
 """
 
+import os
 from dataclasses import dataclass
 
 VIDEO_PATH = "input/video.mp4"
@@ -64,6 +65,25 @@ DEDUP_MODEL = DEDUP.mlx_id
 
 # Chunking configuration
 CHUNK_SIZE_SEC = 20
+
+# Single-pass AVI mode (Foundry friendly). When enabled, the entire video's
+# OCR + transcript is fed to the judge as ONE block instead of per-20s chunks.
+# This drops per-block time attribution but reduces judge round-trips and the
+# local 20s-bucket output shape. The proposer stage still needs chunk
+# boundaries IF the assembled full context is too large — see the fallback in
+# server/pipeline_runner.py. Toggle via AVI_SINGLE_PASS=1.
+AVI_SINGLE_PASS = os.getenv("AVI_SINGLE_PASS", "0") == "1"
+# Per-judge-call output budget for a single-pass prompt. The default
+# JUDGE_MAX_TOKENS (150) is far too small to emit ALL bullets for a long video.
+SINGLE_PASS_JUDGE_MAX_TOKENS = 8000
+# Conservative input-budget guard: if the assembled full context is estimated
+# to exceed this many tokens, single-pass falls back to coarse chunking instead
+# of overflowing the hosted model's context window.
+SINGLE_PASS_INPUT_TOKEN_CAP = 100000
+# Downstream dedup/priority/config are bounded per block. With one whole-video
+# block the bullet list can be large; cap it so the O(n^2) Jaccard prefilter and
+# per-cluster LLM calls stay reasonable.
+SINGLE_PASS_MAX_BULLETS = 500
 
 # Generation configuration
 MAX_NEW_TOKENS = 512
@@ -158,6 +178,35 @@ AVI_RAW_TEMPLATE = (
     "SCREEN TEXT (on-screen UI labels with normalized screen region):\n"
     "{screen_text}\n\n"
     "SPOKEN TRANSCRIPT:\n{transcript}"
+)
+
+# Single-pass judge prompt: the SAME raw OCR + transcript as AVI_JUDGE_SYSTEM,
+# but for the WHOLE video in one call rather than one 20s segment. The model
+# must enumerate every distinct capability across the full product demo without
+# relying on a single short window to bound the output.
+AVI_SINGLE_PASS_SYSTEM = (
+    "You are a strict systems analyst watching an entire product demo video. "
+    "Below you will be given OCR (on-screen text captured from the video "
+    "frames) and the spoken transcript for the WHOLE video, in chronological "
+    "order. Segment lines carry a start timestamp in square brackets, e.g. "
+    "'[45.0s]', and OCR lines carry the on-screen region, e.g. '(top-right)'.\n"
+    "- Translate the observed UI and narrated behaviour into distinct, testable "
+    "system capabilities for the ENTIRE video. Do not limit yourself to the "
+    "first part — capture capabilities from the beginning, middle, and end.\n"
+    "- Do NOT infer business goals, ROI, or marketing claims.\n"
+    "- Combine granular micro-actions into broader feature sets (e.g. 'click "
+    "line', 'click circle' → 'The system must provide 2D geometric sketching "
+    "tools').\n"
+    "- Each bullet must be phrased as: "
+    "'The system shall allow users to [specific technical action]'.\n"
+    "- Prefer on-screen UI text (labels, buttons, menus) when it is present — it "
+    "usually names the feature more precisely than speech.\n"
+    "- Use OCR region prefixes to describe screen layout (top/bottom, "
+    "left/center/right, and relative ordering) where the text actually shows it.\n"
+    "- Only report UI and layout that the OCR text and positions actually show; "
+    "do not invent controls that are not present.\n"
+    "- Drop duplication and generic statements. No preamble, plain text only. "
+    "Use timestamped, fact-based bullet points.\n"
 )
 
 # Judges configuration — single judge, replacing the 3-judge panel

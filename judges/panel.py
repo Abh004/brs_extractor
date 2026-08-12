@@ -54,11 +54,11 @@ class JudgesPanel:
         self._backend.clear_cache()
         print("Judge unloaded.")
 
-    def evaluate(self, raw_output: str) -> str:
+    def evaluate(self, raw_output: str, max_tokens: int | None = None) -> str:
         raw = self._backend.generate_llm(
             handle=self._handle,
             system_prompt=self._system_prompt,
             user_prompt=raw_output,
-            max_tokens=JUDGE_MAX_TOKENS,
+            max_tokens=max_tokens or JUDGE_MAX_TOKENS,
         )
         return _validate_bullets(raw)

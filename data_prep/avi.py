@@ -97,3 +97,23 @@ def get_valid_avi_chunks(chunks: dict) -> list:
         for b in sorted(chunks)
         if chunks[b]["text_lines"] or chunks[b]["ocr_lines"]
     ]
+
+
+def build_avi_single_pass_chunk(index: dict) -> dict:
+    """
+    Assemble the ENTIRE video's OCR + transcript into a single chunk dict
+    (no 20s bucketing), so single-pass mode can feed the whole demo to the
+    judge in one call. Shares the {text_lines, ocr_lines, frame_paths} shape
+    with `_new_chunk()`, so AVIProposer.generate() consumes it unchanged.
+
+    Args:
+        index: Parsed AVI index dict (as returned by avi.upload_and_index).
+
+    Returns:
+        A single chunk dict with all transcript + OCR lines in chronological
+        order (each still carrying its start timestamp / screen region).
+    """
+    chunk = _new_chunk()
+    chunk["text_lines"] = [_line(seg) for seg in get_transcript(index)]
+    chunk["ocr_lines"] = [_ocr_line(seg) for seg in get_ocr_spatial(index)]
+    return chunk
