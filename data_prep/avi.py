@@ -13,8 +13,9 @@ which usually names features more precisely than the narration.
 from __future__ import annotations
 
 import math
+import re
 
-from config import CHUNK_SIZE_SEC
+from config import AVI_OCR_NOISE_FILTER, CHUNK_SIZE_SEC
 
 from avi import get_ocr_spatial, get_transcript
 
@@ -106,14 +107,73 @@ def build_avi_single_pass_chunk(index: dict) -> dict:
     judge in one call. Shares the {text_lines, ocr_lines, frame_paths} shape
     with `_new_chunk()`, so AVIProposer.generate() consumes it unchanged.
 
+    OCR noise (URLs, watermarks, footers, version strings) is stripped first
+    (when AVI_OCR_NOISE_FILTER is enabled) so incidental screen text is never
+    surfaced to the judge as a requirement.
+
     Args:
         index: Parsed AVI index dict (as returned by avi.upload_and_index).
 
     Returns:
-        A single chunk dict with all transcript + OCR lines in chronological
-        order (each still carrying its start timestamp / screen region).
+        A single chunk dict with all transcript + (noise-filtered) OCR lines
+        in chronological order (each still carrying its start timestamp /
+        screen region).
     """
     chunk = _new_chunk()
     chunk["text_lines"] = [_line(seg) for seg in get_transcript(index)]
-    chunk["ocr_lines"] = [_ocr_line(seg) for seg in get_ocr_spatial(index)]
+    ocr_segments = get_ocr_spatial(index)
+    if AVI_OCR_NOISE_FILTER:
+        ocr_segments = filter_ocr_noise(ocr_segments)
+    chunk["ocr_lines"] = [_ocr_line(seg) for seg in ocr_segments]
     return chunk
+
+
+# A bare line is treated as noise when its visible text, after leading
+# punctuation is stripped, matches any of these — i.e. the line is PREDOMINANTLY
+# non-functional incidental text (URL/domain, email, watermark/copyright,
+# footer, version/build label), not a UI control label.
+_NOISE_RE = re.compile(
+    r"(?:"
+    r"https?://\S+"
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+    r"|\S+\.(?:com|net|org|io|co|ai|edu|gov|dev|app)\b"
+    r"|copyright|\W©|watermark"
+    r"|\bv\d+(?:\.\d+)*\b"
+    r"|\b(?:ver|version|build|rev|release)\s*(?:no\.?\s*)?\d+(?:[.\s]\d+)*\b"
+    r"|\b(?:all\s+rights\s+reserved|privacy\s+policy|terms\s+of\s+(?:use|service))\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_noise_line(text: str) -> bool:
+    """True if a non-empty OCR line is predominantly non-functional noise.
+
+    A line is dropped only when the matched noise token(s) account for at
+    least half its visible length. This drops standalone URLs/domains/emails
+    ('bellisjoneshill.com'), watermarks, and footers, while keeping real
+    label lines where a domain just happens to appear mid-sentence.
+    """
+    stripped = text.strip().lstrip("([{").strip()
+    if not stripped:
+        return False
+    matches = list(_NOISE_RE.finditer(stripped))
+    if not matches:
+        return False
+    covered = sum(len(m.group(0)) for m in matches if m.group(0))
+    return covered * 2 >= len(stripped)
+
+
+def filter_ocr_noise(segments: list[dict]) -> list[dict]:
+    """
+    Drop OCR segments whose visible text is predominantly incidental noise
+    (bare URLs/domains, emails, watermarks, copyright/footer text, version
+    strings). A domain or number appearing mid-sentence alongside functional
+    text is kept, so genuine labels are not lost.
+
+    Args:
+        segments: Raw OCR segments [{start, end, text, ...}].
+    Returns:
+        A new list with noise segments removed.
+    """
+    return [seg for seg in segments if not _is_noise_line((seg.get("text") or ""))]

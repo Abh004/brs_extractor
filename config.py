@@ -84,6 +84,19 @@ SINGLE_PASS_INPUT_TOKEN_CAP = 100000
 # block the bullet list can be large; cap it so the O(n^2) Jaccard prefilter and
 # per-cluster LLM calls stay reasonable.
 SINGLE_PASS_MAX_BULLETS = 500
+# Pre-merge input bound for the whole-video block's dedup. Generous enough that
+# unique requirements are rarely dropped, tight enough that the O(n^2) Jaccard
+# prefilter and per-cluster LLM calls stay bounded. The final SINGLE_PASS_MAX_BULLETS
+# cap is applied AFTER merging, so duplicates cannot crowd out unique bullets.
+SINGLE_PASS_DEDUP_INPUT_CAP = 1500
+# Lower Jaccard prefilter threshold for the whole-video block. The per-chunk
+# default (CANDIDATE_THRESHOLD=0.40) misses near-paraphrases; a lower threshold
+# raises recall so the LLM adjudicator actually sees similar-but-differently-worded
+# bullets and can merge them.
+SINGLE_PASS_CANDIDATE_THRESHOLD = 0.25
+# Strip clearly non-functional OCR noise (bare URLs/domains, emails, watermarks,
+# copyright/footer, version strings) before the judge sees the screen text.
+AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 
 # Generation configuration
 MAX_NEW_TOKENS = 512
@@ -194,6 +207,12 @@ AVI_SINGLE_PASS_SYSTEM = (
     "system capabilities for the ENTIRE video. Do not limit yourself to the "
     "first part — capture capabilities from the beginning, middle, and end.\n"
     "- Do NOT infer business goals, ROI, or marketing claims.\n"
+    "- IGNORE non-functional, incidental screen text: URLs and domain names "
+    "(e.g. 'example.com'), email addresses, watermarks, copyright and footer "
+    "text, version or build numbers, timestamps, cookie/consent banners, "
+    "brand slogans, and search-placeholder or breadcrumb strings. Only convert "
+    "actual interactive controls (buttons, menus, forms, toggles) and core "
+    "narrated behaviour into requirements.\n"
     "- Combine granular micro-actions into broader feature sets (e.g. 'click "
     "line', 'click circle' → 'The system must provide 2D geometric sketching "
     "tools').\n"
@@ -205,6 +224,9 @@ AVI_SINGLE_PASS_SYSTEM = (
     "left/center/right, and relative ordering) where the text actually shows it.\n"
     "- Only report UI and layout that the OCR text and positions actually show; "
     "do not invent controls that are not present.\n"
+    "- If the same capability or feature recurs at several timestamps across "
+    "the video, describe it ONCE (consolidating the recurrences into a single "
+    "bullet); do not restate the same requirement per timestamp.\n"
     "- Drop duplication and generic statements. No preamble, plain text only. "
     "Use timestamped, fact-based bullet points.\n"
 )

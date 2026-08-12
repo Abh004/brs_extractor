@@ -39,6 +39,8 @@ from config import (
     DEDUP_MODEL,
     DOCX_FILE,
     OUTPUT_FILE,
+    SINGLE_PASS_CANDIDATE_THRESHOLD,
+    SINGLE_PASS_DEDUP_INPUT_CAP,
     SINGLE_PASS_INPUT_TOKEN_CAP,
     SINGLE_PASS_JUDGE_MAX_TOKENS,
     SINGLE_PASS_MAX_BULLETS,
@@ -607,7 +609,9 @@ class PipelineRunner:
         return duration
 
     def _dedup_within_blocks(self, refined: list, backend, llm_handle,
-                             max_bullets: int | None = None) -> list:
+                             max_dedup_input: int | None = None,
+                             max_bullets: int | None = None,
+                             candidate_threshold: float | None = None) -> list:
         """Deduplicate semantically-equivalent bullets within each time block.
 
         The judge panel already applies a substring filter per chunk; this adds
@@ -615,10 +619,17 @@ class PipelineRunner:
         collapsed too. Returns a new list — never mutates the input.
 
         Args:
-            max_bullets: Optional cap applied to each block's bullet list
-                         BEFORE dedup, so the O(n^2) Jaccard prefilter and the
-                         per-cluster LLM calls stay bounded (single-pass mode
-                         produces one whole-video block).
+            max_dedup_input:      Optional cap on each block's bullet list
+                                  fed to the Jaccard prefilter, so the O(n^2)
+                                  prefilter and per-cluster LLM calls stay
+                                  bounded (single-pass mode produces one
+                                  whole-video block).
+            max_bullets:          Optional cap applied AFTER merging, so the
+                                  final output stays bounded without letting
+                                  duplicates crowd out unique requirements.
+            candidate_threshold:  Jaccard prefilter cutoff passed to
+                                  cluster_candidates (lower = higher recall,
+                                  more LLM adjudication calls).
         """
         updated: list[dict] = []
         for req in refined:
@@ -630,9 +641,14 @@ class PipelineRunner:
             if not bullets:
                 updated.append(req)
                 continue
+            if max_dedup_input:
+                bullets = bullets[:max_dedup_input]
+            kwargs = {}
+            if candidate_threshold is not None:
+                kwargs["candidate_threshold"] = candidate_threshold
+            deduped = dedup_bullets_llm(bullets, backend, llm_handle, **kwargs)
             if max_bullets:
-                bullets = bullets[:max_bullets]
-            deduped = dedup_bullets_llm(bullets, backend, llm_handle)
+                deduped = deduped[:max_bullets]
             new_req = dict(req)
             new_req["refined_requirements"] = (
                 "\n".join(f"- {b}" for b in deduped) if deduped else None
@@ -663,8 +679,14 @@ class PipelineRunner:
                 with backend.usage.stage("stage5_dedup"):
                     refined = self._dedup_within_blocks(
                         refined, backend, judge3_handle,
+                        max_dedup_input=(
+                            SINGLE_PASS_DEDUP_INPUT_CAP if self._single_pass else None
+                        ),
                         max_bullets=(
                             SINGLE_PASS_MAX_BULLETS if self._single_pass else None
+                        ),
+                        candidate_threshold=(
+                            SINGLE_PASS_CANDIDATE_THRESHOLD if self._single_pass else None
                         ),
                     )
 
