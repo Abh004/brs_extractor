@@ -33,6 +33,8 @@ from config import (
     AVI_KEYFRAME_SUMMARY,
     AVI_SINGLE_PASS,
     AVI_SINGLE_PASS_SYSTEM,
+    AVI_UI_MAX_FRAMES,
+    AVI_UI_SOURCE,
     CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
     CONFIG_FILE,
@@ -59,6 +61,7 @@ from judges.dedup import (
 )
 from judges.priority import classify_priorities
 from models import AVIProposer
+from models.frame_ui_proposer import get_keyframe_ui_description
 from utils import flag_unknown_words
 
 try:
@@ -265,7 +268,7 @@ class PipelineRunner:
 
         if self._single_pass:
             full_chunk = build_avi_single_pass_chunk(index)
-            if AVI_KEYFRAME_SUMMARY:
+            if AVI_KEYFRAME_SUMMARY and AVI_UI_SOURCE == "avi":
                 self._emit(cb, StageUpdate(
                     1, "Azure Video Indexer", "running",
                     "Creating keyframe UI summary (component placement)...",
@@ -282,6 +285,8 @@ class PipelineRunner:
                         f"continuing with OCR + transcript only."
                     )
                     full_chunk["ui_description"] = None
+            # Route B (foundry) attaches its UI description in Stage 2 once the
+            # backend is available; the estimate here covers OCR + transcript only.
             context = AVIProposer.render(full_chunk)
             estimated = _estimate_tokens(context)
             if estimated > SINGLE_PASS_INPUT_TOKEN_CAP:
@@ -324,6 +329,35 @@ class PipelineRunner:
                                    "Setting up AVI proposer...", 0.3))
         self._check_cancelled()
         proposer = AVIProposer(index=index)
+        self._check_cancelled()
+
+        # Route B: describe on-screen UI from keyframes via the Foundry vision
+        # backend. Runs here (backend available) and only when single-pass survived.
+        if (
+            AVI_KEYFRAME_SUMMARY
+            and AVI_UI_SOURCE == "foundry"
+            and self._single_pass
+            and self._full_chunk is not None
+        ):
+            self._emit(cb, StageUpdate(
+                2, "Model Initialization", "running",
+                "Describing UI components from keyframes (Foundry vision)...",
+                0.4))
+            try:
+                ui = get_keyframe_ui_description(
+                    backend,
+                    video_path=self._video_path,
+                    index=index,
+                    output_dir=self._output_dir,
+                    max_frames=AVI_UI_MAX_FRAMES,
+                )
+                self._full_chunk["ui_description"] = ui or None
+            except Exception as e:
+                print(
+                    f"  [UI] keyframe UI description failed ({e}); "
+                    f"continuing with OCR + transcript only."
+                )
+                self._full_chunk["ui_description"] = None
         self._check_cancelled()
 
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",

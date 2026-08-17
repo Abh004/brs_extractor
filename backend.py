@@ -128,8 +128,14 @@ class InferenceBackend(ABC):
         max_tokens: int = 150,
         repetition_penalty: float | None = None,
         repetition_context_size: int = 20,
+        images: list[str] | None = None,
     ) -> str:
-        """Run text-only inference using a previously loaded handle."""
+        """Run text-only inference using a previously loaded handle.
+
+        Args:
+            images: Optional list of image data URLs (e.g. "data:image/jpeg;base64,...")
+                    for multimodal backends. Text-only backends raise if set.
+        """
 
     @abstractmethod
     def unload_llm(self, handle: Any) -> None:
@@ -240,7 +246,13 @@ class MLXBackend(InferenceBackend):
         max_tokens: int = 150,
         repetition_penalty: float | None = None,
         repetition_context_size: int = 20,
+        images: list[str] | None = None,
     ) -> str:
+        if images:
+            raise ValueError(
+                "MLXBackend does not support image input; send frames via "
+                "BACKEND=foundry (a vision-capable deployment) instead."
+            )
         if handle.get("vlm_backed"):
             from mlx_vlm import generate
             from mlx_vlm.prompt_utils import apply_chat_template
@@ -466,8 +478,15 @@ class HFBackend(InferenceBackend):
         max_tokens: int = 150,
         repetition_penalty: float | None = None,
         repetition_context_size: int = 20,  # noqa: ARG002 — no HF equivalent; kept for interface parity with MLXBackend
+        images: list[str] | None = None,
     ) -> str:
         import torch
+
+        if images:
+            raise ValueError(
+                "HFBackend does not support image input; send frames via "
+                "BACKEND=foundry (a vision-capable deployment) instead."
+            )
 
         tokenizer = handle["tokenizer"]
         model = handle["model"]
@@ -648,12 +667,25 @@ class FoundryBackend(InferenceBackend):
         max_tokens: int = 150,
         repetition_penalty: float | None = None,  # noqa: ARG002 — not an OpenAI param
         repetition_context_size: int = 20,  # noqa: ARG002 — not an OpenAI param
+        images: list[str] | None = None,
     ) -> str:
+        if images:
+            detail = os.getenv("AVI_UI_FRAME_DETAIL", "low")
+            user_content = [{"type": "text", "text": user_prompt}]
+            for url in images:
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": url, "detail": detail},
+                    }
+                )
+        else:
+            user_content = user_prompt
         payload = {
             "model": handle.get("model_id") or self._deployment,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": max_tokens,
             "temperature": 0.0,

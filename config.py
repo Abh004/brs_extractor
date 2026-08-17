@@ -140,6 +140,37 @@ AVI_KEYFRAME_SECTION_TEMPLATE = (
     "{ui_description}\n\n"
 )
 
+# ── UI-description source (Route A vs Route B) ─────────────────────────────
+# AVI_KEYFRAME_SUMMARY enables the component-placement pass; AVI_UI_SOURCE picks
+# WHO runs the vision:
+#   "avi"     → Route A: AVI's Create-Textual-Summary (needs an AVI-linked
+#               deployment name AVI accepts, via AZURE_VIDEO_INDEXER_DEPLOYMENT).
+#   "foundry" → Route B (default): fetch AVI keyframe JPEGs ourselves and send
+#               them to the user's Foundry gpt-4o deployment (no AVI deployment
+#               requirement). This is the recommended path.
+AVI_UI_SOURCE = os.getenv("AVI_UI_SOURCE", "foundry")
+# Cache file for the Route B keyframe UI description (kept separate from the
+# Route A summary file so switching sources never serves stale text).
+AVI_UI_DESCRIPTION_FILE = "avi_ui_description.json"
+# Cap on how many keyframes a single vision request may carry (Azure OpenAI
+# allows up to 10 images per chat-completions request). Sampled evenly.
+AVI_UI_MAX_FRAMES = 10
+# Vision image resolution: low (cheap) | auto | high.
+AVI_UI_FRAME_DETAIL = os.getenv("AVI_UI_FRAME_DETAIL", "low")
+# Output budget for the UI-description vision call.
+AVI_UI_DESCRIPTION_MAX_TOKENS = 2000
+# System prompt for the Route B vision pass. Focused on component PLACEMENT only
+# (the judge below turns it, plus OCR + transcript, into requirement bullets).
+AVI_UI_DESCRIPTION_SYSTEM = (
+    "You are a UI analyst reviewing keyframes from a software product demo. "
+    "The attached images are keyframes from the demo video, in chronological "
+    "order. For each distinct screen, describe the UI layout precisely: the "
+    "placement of buttons, menus, panels and dialogs (top/bottom, left/center/"
+    "right and relative ordering), and the position of non-text graphical "
+    "components such as logos and icons. Only describe what is actually visible "
+    "in the frames. Be factual and concise; no preamble."
+)
+
 # Generation configuration
 MAX_NEW_TOKENS = 512
 TEMPERATURE = 0.0

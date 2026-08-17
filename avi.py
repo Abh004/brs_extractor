@@ -308,6 +308,44 @@ def _request(
     return resp.json()
 
 
+def _request_raw(
+    method: str, url: str, headers: dict[str, str], body: bytes | None = None
+) -> bytes:
+    """Perform an HTTP request and return the raw response body bytes.
+
+    Like `_request` but for binary endpoints (e.g. Get-Video-Thumbnail returns
+    JPEG bytes, not JSON). Same auth/token/diagnostic/retry behavior.
+    """
+    url = _append_access_token(url)
+    display_url = _redact_url(url)
+    try:
+        resp = _session().request(
+            method,
+            url,
+            headers=headers,
+            data=body,
+            timeout=(AVI_CONNECT_TIMEOUT, AVI_READ_TIMEOUT),
+            verify=_verify(),
+        )
+    except requests.exceptions.Timeout as e:
+        raise RuntimeError(
+            "AVI request timed out / connection aborted. Check your "
+            "VPN/proxy/firewall, or set AVI_NO_PROXY=1 to bypass the proxy."
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            f"AVI network error during {method} {display_url}: {e}. Check your "
+            f"VPN/proxy/firewall, or set AVI_NO_PROXY=1 to bypass the proxy."
+        ) from e
+
+    if resp.status_code >= 400:
+        _diagnose(method, url, resp)
+        raise RuntimeError(
+            f"AVI HTTP {resp.status_code} {method} {display_url} -> {resp.text[:500]}"
+        )
+    return resp.content
+
+
 def _upload_marker_path(output_dir: str) -> str:
     """Path of the file recording videoIds of uploads started by this tool."""
     return os.path.join(output_dir, "avi_upload.json")
@@ -862,3 +900,164 @@ def get_keyframe_ui_summary(
         f.write(_source_identity(video_path))
     print(f"  [AVI] keyframe summary cached: {cache_path}")
     return text
+
+
+# ── Keyframe extraction (Route B: fetch frame images ourselves) ─────────────
+# Instead of AVI's Create-Textual-Summary (which needs a deployment name AVI
+# accepts), Route B pulls the actual keyframe JPEGs from the index's shots and
+# lets the user's own Foundry gpt-4o deployment do the vision pass. The index
+# already carries each keyframe's thumbnailId + timestamp via Get-Video-Index;
+# each frame image comes from Get-Video-Thumbnail.
+
+_HMS = re.compile(
+    r"^(?:(?P<h>\d+):)?(?:(?P<m>\d+):)?(?P<s>\d+(?:\.\d+)?)$"
+)
+
+
+def _parse_hms(value: Any) -> float | None:
+    """Parse an AVI "H:MM:SS.ffffff" / "MM:SS.ff" / "SS.ff" timestamp to seconds."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = _HMS.fullmatch(str(value).strip())
+    if not m:
+        return None
+    h = float(m.group("h") or 0)
+    mi = float(m.group("m") or 0)
+    s = float(m.group("s") or 0)
+    return h * 3600 + mi * 60 + s
+
+
+def get_keyframes(index: dict) -> list[dict]:
+    """Extract keyframe thumbnails from the AVI index, chronologically.
+
+    Reads `insights.shots[].keyFrames[].instances[]`, dedupes by thumbnailId,
+    and returns [{thumbnail_id, start}] sorted by start time (seconds).
+
+    Args:
+        index: Parsed AVI index dict.
+
+    Returns:
+        Chronological list of {thumbnail_id, start_sec}.
+    """
+    insights = _insights(index)
+    found: dict[str, float] = {}
+    for shot in insights.get("shots") or []:
+        for kf in shot.get("keyFrames") or []:
+            instances = kf.get("instances") or []
+            for inst in instances:
+                tid = inst.get("thumbnailId")
+                if not tid:
+                    continue
+                start = _parse_seconds(inst.get("start")) or _parse_hms(inst.get("start"))
+                if start is None:
+                    start = 0.0
+                # Keep the earliest occurrence per thumbnail.
+                if tid not in found or start < found[tid]:
+                    found[tid] = start
+    out = [
+        {"thumbnail_id": tid, "start_sec": start}
+        for tid, start in found.items()
+    ]
+    out.sort(key=lambda f: f["start_sec"])
+    return out
+
+
+def sample_keyframes(
+    keyframes: list[dict], max_frames: int | None = None
+) -> list[dict]:
+    """Evenly sample keyframes in chronological order, capped at `max_frames`.
+
+    Args:
+        keyframes:  Chronological keyframe list from get_keyframes.
+        max_frames: Maximum frames to keep (None = keep all). AVI keyframe counts
+                    can be large; vision calls are capped at ~10 images/request.
+    Returns:
+        A new, evenly-spaced (from the ends) list, still chronological.
+    """
+    if not keyframes:
+        return []
+    if not max_frames or len(keyframes) <= max_frames:
+        return list(keyframes)
+    n = len(keyframes)
+    # Include the first and last, plus evenly spaced interior picks.
+    indices = {0, n - 1}
+    step = (n - 1) / (max_frames - 1) if max_frames > 1 else float("inf")
+    for k in range(1, max_frames - 1):
+        indices.add(round(k * step))
+    return [keyframes[i] for i in sorted(indices)]
+
+
+def _source_signature(video_path: str) -> str:
+    """Short stable hash of the source video identity (for a frames dir name)."""
+    import hashlib
+
+    sig = _source_identity(video_path)
+    return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
+
+
+def fetch_thumbnail_bytes(base: str, video_id: str, thumbnail_id: str) -> bytes:
+    """Download a keyframe thumbnail from AVI as raw image bytes."""
+    url = f"{base}/Videos/{video_id}/Thumbnails/{thumbnail_id}"
+    return _request_raw("GET", url, _authed())
+
+
+def fetch_sample_keyframes(
+    video_path: str,
+    index: dict,
+    output_dir: str = "output",
+    max_frames: int | None = None,
+) -> list[dict]:
+    """Download + cache an evenly-sampled set of keyframe JPEGs.
+
+    Caches frames under `output_dir/frames/<source_signature>/` so re-runs never
+    re-download. Returns [{thumbnail_id, start_sec, path}].
+
+    Args:
+        video_path: Path of the source video (for the cache marker).
+        index:      Parsed AVI index dict.
+        output_dir: Base output dir (frames live in a `frames/` subdir).
+        max_frames: Cap on how many frames to keep (None = all).
+
+    Returns:
+        List of {thumbnail_id, start_sec, path}.
+    """
+    location = _env("AZURE_VIDEO_INDEXER_LOCATION")
+    account_id = _env("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
+    base = _account_url(location, account_id)
+    video_id = _summary_video_id(index)
+
+    keyframes = get_keyframes(index)
+    if not keyframes:
+        print("  [AVI] no keyframes in index (shots insight missing); "
+              "continuing with OCR + transcript only.")
+        return []
+    sampled = sample_keyframes(keyframes, max_frames)
+
+    frames_dir = os.path.join(output_dir, "frames", _source_signature(video_path))
+    marker_path = os.path.join(frames_dir, ".marker")
+    cached = os.path.exists(marker_path) and _marker_matches(marker_path, video_path)
+
+    results: list[dict] = []
+    for kf in sampled:
+        tid = kf["thumbnail_id"]
+        path = os.path.join(frames_dir, f"{tid}.jpg")
+        if cached and os.path.exists(path):
+            results.append({"thumbnail_id": tid, "start_sec": kf["start_sec"], "path": path})
+            continue
+        os.makedirs(frames_dir, exist_ok=True)
+        try:
+            data = fetch_thumbnail_bytes(base, video_id, tid)
+        except RuntimeError:
+            continue
+        with open(path, "wb") as f:
+            f.write(data)
+        results.append({"thumbnail_id": tid, "start_sec": kf["start_sec"], "path": path})
+
+    if results:
+        os.makedirs(frames_dir, exist_ok=True)
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.write(_source_identity(video_path))
+    print(f"  [AVI] fetched {len(results)} keyframes -> {frames_dir}")
+    return results

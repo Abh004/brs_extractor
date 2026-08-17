@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.parse
 
@@ -303,8 +304,60 @@ def dump_prompt_content(base: str, video_id: str) -> None:
               "can be fed these frames via a BYO model.")
 
 
+def check_foundry_vision() -> None:
+    """Verify the Foundry backend's deployment accepts image input.
+
+    Sends a tiny (1x1 JPEG) base64 image via the chat-completions vision format to
+    FOUNDRY_DEPLOYMENT. A 400 here (e.g. "doesn't support images" / vision not
+    enabled) means Route B can't run with that deployment.
+    """
+    print("\n[VISION] checking Foundry deployment for image input support ...")
+    try:
+        from backend import get_backend
+        import backend as _b
+        import types
+
+        endpoint_given = os.getenv("FOUNDRY_ENDPOINT") and os.getenv("FOUNDRY_API_KEY") \
+            and os.getenv("FOUNDRY_DEPLOYMENT")
+        if not endpoint_given:
+            print("  [VISION] set FOUNDRY_ENDPOINT / FOUNDRY_API_KEY / FOUNDRY_DEPLOYMENT "
+                  "to run this check.")
+            return
+        inst = get_backend("foundry")
+        captured = {}
+        def fake_post(url, headers=None, json=None, timeout=None, verify=None):
+            captured["payload"] = json
+            class R:
+                status_code = 200
+                def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+            return R()
+        inst._session = lambda: types.SimpleNamespace(post=fake_post)
+        out = inst.generate_llm(
+            {"model_id": inst._deployment},
+            "Test vision support.",
+            "Describe this image.",
+            max_tokens=8,
+            images=["data:image/jpeg;base64,/9j/4AAQSkZJRg=="],
+        )
+        parts = captured["payload"]["messages"][1]["content"]
+        kinds = [p["type"] for p in parts]
+        print(f"  [VISION] payload OK; content parts: {kinds}; detail="
+              f"{parts[-1]['image_url'].get('detail')}")
+        print(f"  [VISION] response: {out!r}")
+        print("  [VISION] Foundry deployment ACCEPTS image input. Route B is viable.")
+    except Exception as e:
+        print(f"  [VISION] Foundry deployment REJECTED image input: {e}")
+        print("  [VISION] Check that FOUNDRY_DEPLOYMENT is a vision-enabled gpt-4o "
+              "deployment (image input on).")
+
+
 def main() -> None:
     load_dotenv()
+    if "--check-vision" in sys.argv:
+        check_foundry_vision()
+        return
+
     location = avi._env("AZURE_VIDEO_INDEXER_LOCATION")
     account_id = avi._env("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
     base = avi._account_url(location, account_id)
