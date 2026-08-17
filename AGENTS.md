@@ -252,6 +252,9 @@ No tests are implemented yet.
   `_SUFFIXES` in `utils.py`.
 - **Output format:** Modify JSON structure in `_dump_json()` or `_assemble_blocks()`
   in `server/pipeline_runner.py`.
+- **Keyframe vision coverage:** Every AVI keyframe is analyzed. Tune `AVI_UI_BATCH_SIZE`
+  (images per vision request, ≤ Azure's ~10 ceiling) and `AVI_UI_DESCRIPTION_MAX_TOKENS` /
+  `AVI_UI_MAX_DESC_TOKENS` (per-batch and total description budgets) in `config.py`.
 - **Docx layout:** Edit `generate_docx.js` — all content is driven by
   `project_config.json`, no hardcoded product names or categories.
 - **Retry/timeout:** Adjust `_JUDGE_MAX_RETRIES`, `_JUDGE_TIMEOUT_SEC` constants at the

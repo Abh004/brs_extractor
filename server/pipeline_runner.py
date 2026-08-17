@@ -32,7 +32,7 @@ from config import (
     AVI_JUDGE_SYSTEM,
     AVI_SINGLE_PASS,
     AVI_SINGLE_PASS_SYSTEM,
-    AVI_UI_MAX_FRAMES,
+    AVI_UI_BATCH_SIZE,
     CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
     CONFIG_FILE,
@@ -306,7 +306,7 @@ class PipelineRunner:
                     video_path=self._video_path,
                     index=index,
                     output_dir=self._output_dir,
-                    max_frames=AVI_UI_MAX_FRAMES,
+                    batch_size=AVI_UI_BATCH_SIZE,
                 )
                 self._full_chunk["ui_description"] = ui or None
             except Exception as e:
@@ -315,6 +315,17 @@ class PipelineRunner:
                     f"continuing with OCR + transcript only."
                 )
                 self._full_chunk["ui_description"] = None
+            # Account for the (potentially large) UI description in the single-pass
+            # input budget so an oversized analysis block can't silently overflow
+            # the judge's context window.
+            if self._full_chunk.get("ui_description"):
+                est = _estimate_tokens(AVIProposer.render(self._full_chunk))
+                if est > SINGLE_PASS_INPUT_TOKEN_CAP:
+                    print(
+                        f"  [single-pass] WARNING: full context ~{est} tokens exceeds "
+                        f"SINGLE_PASS_INPUT_TOKEN_CAP ({SINGLE_PASS_INPUT_TOKEN_CAP}); "
+                        f"the judge call may be too large to fit the model context."
+                    )
         self._check_cancelled()
 
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",

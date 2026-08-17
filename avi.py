@@ -790,6 +790,29 @@ def sample_keyframes(
     return [keyframes[i] for i in sorted(indices)]
 
 
+def chunk_keyframes(frames: list[dict], batch_size: int) -> list[list[dict]]:
+    """Split a chronological keyframe list into contiguous batches.
+
+    Each batch keeps its frames in the original (temporal) order and holds at
+    most `batch_size` frames, so a batch maps to one vision request (Azure's
+    ~10-image ceiling) and covers a temporally adjacent segment of the video.
+
+    Args:
+        frames:     Chronological keyframe list from get_keyframes.
+        batch_size: Max frames per batch.
+
+    Returns:
+        A list of contiguous, chronological batches.
+    """
+    if batch_size < 1:
+        return [list(frames)]
+    out: list[list[dict]] = []
+    n = len(frames)
+    for i in range(0, n, batch_size):
+        out.append(frames[i : i + batch_size])
+    return out
+
+
 def _source_signature(video_path: str) -> str:
     """Short stable hash of the source video identity (for a frames dir name)."""
     import hashlib

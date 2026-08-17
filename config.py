@@ -71,13 +71,22 @@ AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 # AVI_SINGLE_PASS=1; the frames and the resulting description are cached per
 # source video so a re-run never re-downloads frames or re-pays for vision.
 AVI_UI_DESCRIPTION_FILE = "avi_ui_description.json"
-# Cap on how many keyframes a single vision request may carry (Azure OpenAI
-# allows up to 10 images per chat-completions request). Sampled evenly.
-AVI_UI_MAX_FRAMES = 10
+# EVERY keyframe in the AVI index is analyzed for maximum coverage. Azure OpenAI
+# caps the number of images per chat-completions request, so keyframes are chunked
+# into batches of AVI_UI_BATCH_SIZE (temporally adjacent) and each batch is one
+# vision call; the per-batch descriptions are concatenated. Cost/latency scale
+# linearly with the number of keyframes.
+AVI_UI_BATCH_SIZE = 10
 # Vision image resolution: low (cheap) | auto | high.
 AVI_UI_FRAME_DETAIL = os.getenv("AVI_UI_FRAME_DETAIL", "low")
-# Output budget for the UI-description vision call.
+# Output budget per vision call (one batch).
 AVI_UI_DESCRIPTION_MAX_TOKENS = 2000
+# Safety rail on the CONCATENATED description. The description is prepended to the
+# single-pass OCR + transcript (bounded by SINGLE_PASS_INPUT_TOKEN_CAP); if the
+# concatenation would exceed this many tokens, it is trimmed to its head with a
+# warning. This guards the judge's context window — it is not an intended
+# truncation path (OCR + transcript remain the primary source).
+AVI_UI_MAX_DESC_TOKENS = 20000
 # System prompt for the vision pass. Focused on component PLACEMENT only
 # (the judge below turns it, plus OCR + transcript, into requirement bullets).
 AVI_UI_DESCRIPTION_SYSTEM = (
