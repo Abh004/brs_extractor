@@ -41,6 +41,8 @@ from config import (
     AVI_INDEX_TIMEOUT_SEC,
     AVI_KEYFRAME_INSTRUCTIONS,
     AVI_KEYFRAME_SUMMARY_FILE,
+    AVI_KEYFRAME_SUMMARY_LENGTH,
+    AVI_KEYFRAME_SUMMARY_STYLE,
     AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC,
     AVI_LANGUAGE,
     AVI_MAX_RETRIES,
@@ -708,7 +710,11 @@ def create_textual_summary(
     Raises:
         RuntimeError: if the deployment is rejected / no id is returned.
     """
-    query: dict[str, str] = {"includedFrames": "Keyframes"}
+    query: dict[str, str] = {
+        "includedFrames": "Keyframes",
+        "length": AVI_KEYFRAME_SUMMARY_LENGTH,
+        "style": AVI_KEYFRAME_SUMMARY_STYLE,
+    }
     if deployment:
         query["deploymentName"] = deployment
     if instructions:

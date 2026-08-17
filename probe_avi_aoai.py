@@ -28,7 +28,12 @@ from dotenv import load_dotenv
 
 import avi
 
-from config import AVI_INDEX_FILE, AVI_UPLOAD_NAME
+from config import (
+    AVI_INDEX_FILE,
+    AVI_KEYFRAME_SUMMARY_LENGTH,
+    AVI_KEYFRAME_SUMMARY_STYLE,
+    AVI_UPLOAD_NAME,
+)
 
 PROBE_SUMMARY_TIMEOUT_SEC = 600  # max seconds to wait for a summary job
 
@@ -149,7 +154,10 @@ def resolve_video_id(base: str) -> str:
 def _create_summary(base: str, video_id: str, deployment: str | None,
                     keyframes: bool, instructions: str | None = None):
     """POST Create-Video-Summary; returns (status_code, body_text)."""
-    query: dict[str, str] = {}
+    query: dict[str, str] = {
+        "length": AVI_KEYFRAME_SUMMARY_LENGTH,
+        "style": AVI_KEYFRAME_SUMMARY_STYLE,
+    }
     if deployment:
         query["deploymentName"] = deployment
     if keyframes:

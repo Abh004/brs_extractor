@@ -110,6 +110,12 @@ AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 AVI_KEYFRAME_SUMMARY = os.getenv("AVI_KEYFRAME_SUMMARY", "1") == "1"
 # Max seconds to wait for AVI to finish a keyframe summarization job.
 AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC = 600
+# Create-Video-Summary tuning: AVI requires these two params and rejects the
+# request with HTTP 400 ("Invalid summary length value") when they are absent.
+# length: short | medium | long   (matching the portal's Short/Medium/Long).
+# style:  neutral | casual | formal.
+AVI_KEYFRAME_SUMMARY_LENGTH = "medium"
+AVI_KEYFRAME_SUMMARY_STYLE = "neutral"
 # Cache file for the keyframe UI summary (input artifact, re-used across runs
 # exactly like the AVI index — never cleaned by the pipeline).
 AVI_KEYFRAME_SUMMARY_FILE = "avi_keyframe_summary.json"
