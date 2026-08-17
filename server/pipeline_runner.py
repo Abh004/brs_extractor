@@ -30,7 +30,7 @@ from backend import check_hf_reachable, get_backend, print_hf_unreachable_warnin
 from config import (
     AVI_INDEX_FILE,
     AVI_JUDGE_SYSTEM,
-    AVI_RAW_TEMPLATE,
+    AVI_KEYFRAME_SUMMARY,
     AVI_SINGLE_PASS,
     AVI_SINGLE_PASS_SYSTEM,
     CHECKPOINT_FILE,
@@ -265,10 +265,24 @@ class PipelineRunner:
 
         if self._single_pass:
             full_chunk = build_avi_single_pass_chunk(index)
-            context = AVI_RAW_TEMPLATE.format(
-                screen_text="\n".join(full_chunk["ocr_lines"]) or "(no on-screen text)",
-                transcript="\n".join(full_chunk["text_lines"]) or "(no speech)",
-            )
+            if AVI_KEYFRAME_SUMMARY:
+                self._emit(cb, StageUpdate(
+                    1, "Azure Video Indexer", "running",
+                    "Creating keyframe UI summary (component placement)...",
+                    0.92))
+                try:
+                    full_chunk["ui_description"] = avi_client.get_keyframe_ui_summary(
+                        video_path=self._video_path,
+                        index=index,
+                        output_dir=self._output_dir,
+                    )
+                except Exception as e:
+                    print(
+                        f"  [AVI] keyframe UI summary failed ({e}); "
+                        f"continuing with OCR + transcript only."
+                    )
+                    full_chunk["ui_description"] = None
+            context = AVIProposer.render(full_chunk)
             estimated = _estimate_tokens(context)
             if estimated > SINGLE_PASS_INPUT_TOKEN_CAP:
                 print(

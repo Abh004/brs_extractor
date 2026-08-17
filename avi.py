@@ -39,6 +39,9 @@ from config import (
     AVI_CONNECT_TIMEOUT,
     AVI_INDEX_FILE,
     AVI_INDEX_TIMEOUT_SEC,
+    AVI_KEYFRAME_INSTRUCTIONS,
+    AVI_KEYFRAME_SUMMARY_FILE,
+    AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC,
     AVI_LANGUAGE,
     AVI_MAX_RETRIES,
     AVI_POLL_INTERVAL_SEC,
@@ -663,3 +666,193 @@ def load_index(index_path: str) -> dict:
     """Load a previously saved AVI index from disk."""
     with open(index_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ── Keyframe UI summary (component-placement augmentation) ───────────────────
+# AVI's Textual-Summary API (with includedFrames=Keyframes) runs the account's
+# connected vision-capable OpenAI deployment over the video's keyframes and
+# returns a VLM-style UI description. This is what lets the pipeline capture
+# component placement (buttons, menus, panels, logos/icons) that plain OCR text
+# cannot. Mirrors the probe in probe_avi_aoai.py, but uses the normal _request
+# plumbing (auth + token append + diagnostics) instead of a bare probe.
+
+
+def _summary_video_id(index: dict) -> str:
+    """Resolve the videoId from a parsed AVI index dict."""
+    videos = index.get("videos") if isinstance(index, dict) else None
+    if videos and videos[0].get("id"):
+        return str(videos[0]["id"])
+    raise RuntimeError("Cannot resolve videoId from AVI index for keyframe summary.")
+
+
+def create_textual_summary(
+    base: str,
+    video_id: str,
+    deployment: str | None = None,
+    instructions: str | None = AVI_KEYFRAME_INSTRUCTIONS,
+) -> str:
+    """
+    Kick off a frame-grounded textual summary and return its summary id.
+
+    Args:
+        base:         AVI account data-plane URL (see _account_url).
+        video_id:     The indexed video id to summarize.
+        deployment:   Connected OpenAI deployment name sent as deploymentName.
+                      Omit to let AVI use the account default.
+        instructions: Text appended to AVI's summary instructions so the output
+                      reads like a VLM UI-layout description.
+
+    Returns:
+        The summary id to poll with get_textual_summary.
+
+    Raises:
+        RuntimeError: if the deployment is rejected / no id is returned.
+    """
+    query: dict[str, str] = {"includedFrames": "Keyframes"}
+    if deployment:
+        query["deploymentName"] = deployment
+    if instructions:
+        query["addToEndOfSummaryInstructions"] = instructions
+    url = (
+        f"{base}/Videos/{video_id}/Summaries/Textual?"
+        + urllib.parse.urlencode(query)
+    )
+    data = _request("POST", url, _authed())
+    if isinstance(data, dict):
+        for key in ("id", "summaryId", "summary_id", "summaryID"):
+            if data.get(key):
+                return str(data[key])
+    if isinstance(data, str):
+        s = data.strip()
+        if s and " " not in s and "{" not in s and len(s) < 64:
+            return s
+    raise RuntimeError(f"Could not parse summary id from AVI response: {data}")
+
+
+def _summary_status(d: dict) -> str | None:
+    for k in ("status", "state", "jobStatus"):
+        if d.get(k):
+            return str(d[k])
+    return None
+
+
+def _summary_text(d: dict) -> str | None:
+    for k in ("text", "summary", "result", "output", "content"):
+        if isinstance(d.get(k), str) and d[k].strip():
+            return d[k]
+    return None
+
+
+def poll_textual_summary(
+    base: str,
+    video_id: str,
+    summary_id: str,
+    timeout_sec: float = AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC,
+) -> str:
+    """
+    Poll a frame-grounded textual summary until it resolves or fails.
+
+    Args:
+        base:        AVI account data-plane URL.
+        video_id:    The indexed video id being summarized.
+        summary_id:  The id returned by create_textual_summary.
+        timeout_sec: Hard cap on the polling window.
+
+    Returns:
+        The summary body text once ready.
+
+    Raises:
+        TimeoutError: if AVI does not finish within the timeout.
+        RuntimeError: if AVI reports the job Failed/Error.
+    """
+    url = (
+        f"{base}/Videos/{video_id}/Summaries/Textual/"
+        f"{urllib.parse.quote(summary_id)}"
+    )
+    start = time.time()
+    while True:
+        if time.time() - start > timeout_sec:
+            raise TimeoutError(
+                f"AVI keyframe summary did not finish within {timeout_sec:.0f}s."
+            )
+        data = _request("GET", url, _authed())
+        if isinstance(data, dict):
+            text = _summary_text(data)
+            if text:
+                return text
+            st = _summary_status(data)
+            if st in ("Failed", "Error"):
+                raise RuntimeError(f"AVI keyframe summary {st}:\n{data}")
+            print(f"  [AVI] keyframe summary status: {st or 'unknown'} ...")
+        else:
+            print("  [AVI] keyframe summary not ready ...")
+        time.sleep(AVI_POLL_INTERVAL_SEC)
+
+
+def _keyframe_summary_cache_path(output_dir: str) -> str:
+    """Path of the cached keyframe UI summary (input artifact, like the index)."""
+    return os.path.join(output_dir, AVI_KEYFRAME_SUMMARY_FILE)
+
+
+def get_keyframe_ui_summary(
+    video_path: str,
+    index: dict,
+    output_dir: str = "output",
+    deployment: str | None = None,
+    instructions: str = AVI_KEYFRAME_INSTRUCTIONS,
+    timeout_sec: float = AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC,
+) -> str:
+    """
+    Create + poll AVI's keyframe-based UI summary, caching it per source video.
+
+    Reuses a cached summary when the marker matches the same source video, so a
+    re-run never re-pays for the same video. Returns the summary text.
+
+    Args:
+        video_path:   Path of the source video file (used for the cache marker).
+        index:        Parsed AVI index dict (to resolve the videoId).
+        output_dir:   Where to persist the cached summary + marker.
+        deployment:   Connected OpenAI deployment name. Defaults to the
+                      AZURE_VIDEO_INDEXER_DEPLOYMENT env var (AVI's default if
+                      unset).
+        instructions: Instructions appended to AVI's summary prompt.
+        timeout_sec:  Max seconds to wait for the summary job.
+
+    Returns:
+        The VLM-style UI description text.
+    """
+    cache_path = _keyframe_summary_cache_path(output_dir)
+    marker_path = cache_path + ".marker"
+
+    if os.path.exists(cache_path) and os.path.exists(marker_path):
+        if _marker_matches(marker_path, video_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                text = cached.get("text")
+                if text:
+                    print(f"  [AVI] Reusing cached keyframe summary: {cache_path}")
+                    return text
+            except (OSError, ValueError):
+                pass
+
+    location = _env("AZURE_VIDEO_INDEXER_LOCATION")
+    account_id = _env("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
+    base = _account_url(location, account_id)
+    deploy = deployment or os.getenv("AZURE_VIDEO_INDEXER_DEPLOYMENT", "").strip() or None
+
+    video_id = _summary_video_id(index)
+    print("  [AVI] Creating keyframe UI summary (component placement)...")
+    if deploy:
+        print(f"  [AVI]   deployment={deploy}")
+    summary_id = create_textual_summary(base, video_id, deploy, instructions)
+    print(f"  [AVI]   summary id: {summary_id}")
+    text = poll_textual_summary(base, video_id, summary_id, timeout_sec)
+
+    os.makedirs(output_dir, exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump({"text": text}, f, indent=2, ensure_ascii=False)
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write(_source_identity(video_path))
+    print(f"  [AVI] keyframe summary cached: {cache_path}")
+    return text

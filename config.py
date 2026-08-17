@@ -98,6 +98,42 @@ SINGLE_PASS_CANDIDATE_THRESHOLD = 0.25
 # copyright/footer, version strings) before the judge sees the screen text.
 AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 
+# Optional "component-placement" pass: ask AVI to run its connected vision LLM
+# over the video's keyframes and return a UI-layout description (buttons, menus,
+# panels, logo/icon positions). AVI's Textual-Summary API is whole-video, so this
+# augments SINGLE-PASS mode only. Enabled by default, but it only ever fires when
+# AVI_SINGLE_PASS=1 (which is itself opt-in); it is a paid, async AVI job, cached
+# per source video so a re-run never re-pays. AVI runs the model itself on its
+# own connected OpenAI deployment (read via AZURE_VIDEO_INDEXER_DEPLOYMENT), so no
+# local GPU is needed and the Foundry/text-LLM backend is untouched. Disable with
+# AVI_KEYFRAME_SUMMARY=0.
+AVI_KEYFRAME_SUMMARY = os.getenv("AVI_KEYFRAME_SUMMARY", "1") == "1"
+# Max seconds to wait for AVI to finish a keyframe summarization job.
+AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC = 600
+# Cache file for the keyframe UI summary (input artifact, re-used across runs
+# exactly like the AVI index — never cleaned by the pipeline).
+AVI_KEYFRAME_SUMMARY_FILE = "avi_keyframe_summary.json"
+
+# Instruction appended to the AVI keyframe summary so its output reads like the
+# old frame-based UI proposer: component placement + requirement bullets.
+AVI_KEYFRAME_INSTRUCTIONS = (
+    "Act as a strict systems analyst watching a software demo. For each screen, "
+    "describe the UI layout: the placement of buttons, menus, panels and dialogs "
+    "(top/bottom, left/center/right and relative ordering). Include the position "
+    "of non-text graphical components such as logos and icons. Then list the "
+    "observed functional requirements as distinct bullets starting with "
+    "'The system shall '."
+)
+
+# Section template for the optional VLM keyframe screen-analysis block. Prepended
+# to OCR + transcript in the single-pass context when a keyframe summary exists,
+# so the judge sees component placement (which plain OCR text cannot capture)
+# alongside the exact OCR labels.
+AVI_KEYFRAME_SECTION_TEMPLATE = (
+    "VLM SCREEN ANALYSIS (component placement from video keyframes):\n"
+    "{ui_description}\n\n"
+)
+
 # Generation configuration
 MAX_NEW_TOKENS = 512
 TEMPERATURE = 0.0
@@ -222,8 +258,13 @@ AVI_SINGLE_PASS_SYSTEM = (
     "usually names the feature more precisely than speech.\n"
     "- Use OCR region prefixes to describe screen layout (top/bottom, "
     "left/center/right, and relative ordering) where the text actually shows it.\n"
-    "- Only report UI and layout that the OCR text and positions actually show; "
-    "do not invent controls that are not present.\n"
+    "- If a 'VLM SCREEN ANALYSIS' block is present above the OCR, treat it as an "
+    "authoritative description of component placement (buttons, menus, panels, "
+    "logos, icons, and their positions). Reconcile it with the OCR: prefer the "
+    "OCR for the exact label text, and the VLM analysis for where each component "
+    "sits and for non-text graphical components.\n"
+    "- Only report UI and layout that the OCR text, OCR positions, and any VLM "
+    "screen analysis actually show; do not invent controls that are not present.\n"
     "- If the same capability or feature recurs at several timestamps across "
     "the video, describe it ONCE (consolidating the recurrences into a single "
     "bullet); do not restate the same requirement per timestamp.\n"

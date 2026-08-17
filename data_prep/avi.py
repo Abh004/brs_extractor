@@ -100,7 +100,7 @@ def get_valid_avi_chunks(chunks: dict) -> list:
     ]
 
 
-def build_avi_single_pass_chunk(index: dict) -> dict:
+def build_avi_single_pass_chunk(index: dict, ui_description: str | None = None) -> dict:
     """
     Assemble the ENTIRE video's OCR + transcript into a single chunk dict
     (no 20s bucketing), so single-pass mode can feed the whole demo to the
@@ -112,12 +112,16 @@ def build_avi_single_pass_chunk(index: dict) -> dict:
     surfaced to the judge as a requirement.
 
     Args:
-        index: Parsed AVI index dict (as returned by avi.upload_and_index).
+        index:          Parsed AVI index dict (as returned by avi.upload_and_index).
+        ui_description: Optional VLM keyframe screen-analysis text (component
+                        placement) from avi.get_keyframe_ui_summary. When set, it
+                        is attached to the chunk so the proposer can prepend it
+                        to the OCR + transcript for the judge.
 
     Returns:
         A single chunk dict with all transcript + (noise-filtered) OCR lines
         in chronological order (each still carrying its start timestamp /
-        screen region).
+        screen region), plus an optional keyframe ui_description.
     """
     chunk = _new_chunk()
     chunk["text_lines"] = [_line(seg) for seg in get_transcript(index)]
@@ -125,6 +129,8 @@ def build_avi_single_pass_chunk(index: dict) -> dict:
     if AVI_OCR_NOISE_FILTER:
         ocr_segments = filter_ocr_noise(ocr_segments)
     chunk["ocr_lines"] = [_ocr_line(seg) for seg in ocr_segments]
+    if ui_description:
+        chunk["ui_description"] = ui_description
     return chunk
 
 

@@ -13,7 +13,7 @@ how it drove the old local VLM proposer:
 
 from __future__ import annotations
 
-from config import AVI_RAW_TEMPLATE
+from config import AVI_KEYFRAME_SECTION_TEMPLATE, AVI_RAW_TEMPLATE
 
 
 class AVIProposer:
@@ -21,6 +21,36 @@ class AVIProposer:
 
     def __init__(self, index: dict | None = None) -> None:
         self._index = index
+
+    @staticmethod
+    def render(chunk: dict) -> str:
+        """
+        Compose the single raw context string for a chunk.
+
+        Prepend the optional VLM keyframe screen-analysis block (component
+        placement) when present, then OCR + transcript. Kept as a static helper
+        so the pipeline can estimate input tokens with the EXACT text the judge
+        will receive.
+
+        Args:
+            chunk: A per-bucket chunk dict {text_lines, ocr_lines} and optional
+                   ui_description, from data_prep.avi.load_avi_chunks /
+                   build_avi_single_pass_chunk.
+
+        Returns:
+            Formatted VLM screen analysis (if any) + OCR + transcript text.
+        """
+        screen_text = "\n".join(chunk.get("ocr_lines") or []) or "(no on-screen text)"
+        transcript = "\n".join(chunk.get("text_lines") or []) or "(no speech)"
+        body = AVI_RAW_TEMPLATE.format(
+            screen_text=screen_text,
+            transcript=transcript,
+        ).strip()
+        ui = chunk.get("ui_description")
+        if ui:
+            block = AVI_KEYFRAME_SECTION_TEMPLATE.format(ui_description=ui).strip()
+            body = f"{block}\n\n{body}"
+        return body
 
     def generate(self, chunk: dict) -> str:
         """
@@ -33,12 +63,7 @@ class AVIProposer:
         Returns:
             Formatted OCR + transcript text (the judge's input).
         """
-        screen_text = "\n".join(chunk.get("ocr_lines") or []) or "(no on-screen text)"
-        transcript = "\n".join(chunk.get("text_lines") or []) or "(no speech)"
-        return AVI_RAW_TEMPLATE.format(
-            screen_text=screen_text,
-            transcript=transcript,
-        ).strip()
+        return self.render(chunk)
 
     def unload(self) -> None:
         """No-op — the AVI proposer holds no local model."""
