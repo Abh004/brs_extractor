@@ -7,8 +7,7 @@ Every LLM generation in the project funnels through the backend's
 generate_llm method (backend.py), so a single TokenTracker
 attached to the InferenceBackend can record a per-call token count without
 touching any call sites. The backend exposes exact prompt/completion counts
-(from mlx_lm's stream_generate, the HF input_ids / new_ids lengths, or the
-Foundry usage payload), so no tokenizer round-trip estimation is needed.
+(from the Foundry usage payload) for precise accounting.
 
 Stages are labelled with a small context-manager so records carry the pipeline
 stage that produced them (Stage 3 VLM, Stage 4 judge, Stage 5 dedup/priority,

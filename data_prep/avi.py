@@ -114,9 +114,10 @@ def build_avi_single_pass_chunk(index: dict, ui_description: str | None = None) 
     Args:
         index:          Parsed AVI index dict (as returned by avi.upload_and_index).
         ui_description: Optional VLM keyframe screen-analysis text (component
-                        placement) from avi.get_keyframe_ui_summary. When set, it
-                        is attached to the chunk so the proposer can prepend it
-                        to the OCR + transcript for the judge.
+                        placement) from the Foundry vision pass over AVI
+                        keyframes. When set, it is attached to the chunk so the
+                        proposer can prepend it to the OCR + transcript for the
+                        judge.
 
     Returns:
         A single chunk dict with all transcript + (noise-filtered) OCR lines

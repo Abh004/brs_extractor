@@ -13,7 +13,7 @@ how it drove the old local VLM proposer:
 
 from __future__ import annotations
 
-from config import AVI_KEYFRAME_SECTION_TEMPLATE, AVI_RAW_TEMPLATE
+from config import AVI_RAW_TEMPLATE, AVI_UI_SECTION_TEMPLATE
 
 
 class AVIProposer:
@@ -48,7 +48,7 @@ class AVIProposer:
         ).strip()
         ui = chunk.get("ui_description")
         if ui:
-            block = AVI_KEYFRAME_SECTION_TEMPLATE.format(ui_description=ui).strip()
+            block = AVI_UI_SECTION_TEMPLATE.format(ui_description=ui).strip()
             body = f"{block}\n\n{body}"
         return body
 

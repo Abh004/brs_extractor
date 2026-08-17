@@ -1,12 +1,11 @@
 """
 Judges panel — refines VLM output through single LLM judges.
 
-All judge models are loaded ONCE after the VLM proposer is unloaded and
-reused across all chunks. Merging is done via Jaccard-prefiltered LLM
-deduplication (judges/dedup.py) — no merger LLM.
+All judge calls use the single Foundry backend (loaded ONCE after the AVI
+proposer stage) and are reused across all chunks. Merging is done via
+Jaccard-prefiltered LLM deduplication (judges/dedup.py) — no merger LLM.
 
-NOTE on parallelism: MLX GPU streams are thread-local. ThreadPoolExecutor
-workers cannot call generate() — judges run sequentially.
+The pipeline is single-threaded, so judge evaluation runs sequentially.
 """
 
 from .panel import JudgesPanel

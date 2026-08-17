@@ -1,14 +1,14 @@
 # Project Overview
 
 This project extracts functional business requirements from product demo videos by combining
-an Azure Video Indexer (AVI) cloud proposer — per-20s-chunk OCR screen-text + transcript —
-with a single LLM judge (Qwen3.5-9B locally, or gpt-4o via Azure Foundry), within-block
-deduplication, and MoSCoW priority classification. The pipeline uploads the video to AVI,
-splits the indexed OCR + transcript into 20s chunks, has the judge LLM convert each chunk
-into requirement bullets, merges semantically equivalent bullets across time blocks,
-classifies each as Must/Should/Could, infers BRS document structure via LLM, and renders a
-structured Word document. Runs on Apple Silicon via MLX (`BACKEND=mlx`), on any CUDA/CPU
-box (`BACKEND=hf`), or with all text-LLM stages hosted on Azure Foundry (`BACKEND=foundry`).
+an Azure Video Indexer (AVI) cloud proposer — per-20s-chunk OCR screen-text + transcript, plus
+a Foundry-vision component-placement pass — with a single LLM judge (gpt-4o via Azure
+Foundry), within-block deduplication, and MoSCoW priority classification. The pipeline uploads
+the video to AVI, splits the indexed OCR + transcript into 20s chunks, has the judge LLM
+convert each chunk into requirement bullets, merges semantically equivalent bullets across
+time blocks, classifies each as Must/Should/Could, infers BRS document structure via LLM, and
+renders a structured Word document. All LLM stages (and the keyframe vision pass) run on
+Azure Foundry (`BACKEND=foundry`); no local GPU models are used.
 Includes a FastAPI web UI with WebSocket progress streaming.
 
 ## Repository Structure
@@ -17,13 +17,11 @@ Includes a FastAPI web UI with WebSocket progress streaming.
   Run directly: `python main.py`. Or via the web UI: `uvicorn server.app:app`.
 - `config.py` — Single source of truth for paths, model names, chunk sizes, prompts,
   and gen parameters.
-- `backend.py` — Inference backend abstraction: `InferenceBackend` ABC with three
-  implementations — `MLXBackend` (Apple Silicon, `mlx_lm`, supports unified
-  VLM-as-LLM for Qwen3.5), `HFBackend` (cross-platform, HuggingFace transformers +
-  flash-attention), and `FoundryBackend` (hosted Azure OpenAI text-LLM, no local
-  models). Select via `BACKEND` env var. Contains model ID mapping (`_MLX_TO_HF`)
-  for cross-backend compatibility, `_NO_THINK_MODELS` for models needing `/no_think`
-  suffix, and `_VLM_BACKED_TEXT_MODELS` for unified VLM-as-LLM routing.
+- `backend.py` — Inference backend abstraction: `InferenceBackend` ABC with a single
+  implementation, `FoundryBackend` (hosted Azure OpenAI/Foundry chat-completions, text +
+  vision, no local models). Swallows optional `images` (keyframe data URLs) into a multimodal
+  user content array for the vision pass. Select via `BACKEND` env var (only `foundry` is
+  accepted; MLX/HF were removed).
 - `utils.py` — Shared utilities: text cleaning (`strip_special_tokens`,
   `strip_think_blocks`, `clean_output`), spell-checking (`flag_unknown_words`,
   compound-word heuristics, domain-term whitelist), JSON extraction (`extract_balanced_json`,
@@ -61,15 +59,15 @@ Includes a FastAPI web UI with WebSocket progress streaming.
 - `judges/` — Single LLM refinement (`JudgesPanel`) with sequential evaluation, bullet
   validation, and within-block dedup pipeline.
 - `judges/panel.py` — `JudgesPanel`: preload/load/evaluate/unload lifecycle for the single
-  judge model (Qwen3.5-9B). Uses `extract_bullets` → `filter_meta_bullets` →
+  judge model (via the shared Foundry backend). Uses `extract_bullets` → `filter_meta_bullets` →
   `filter_truncated_bullets` → `filter_substrings` for output validation.
 - `judges/dedup.py` — Within-block bullet deduplication via Jaccard prefilter
   (CANDIDATE_THRESHOLD=0.40, pure Python, no embedding model) + LLM cluster resolution
   and canonicalization. No cross-block pass — semantically equivalent bullets are
   collapsed only within the same 20s time block.
-- `judges/priority.py` — Batched MoSCoW priority classification (M/S/C) via Qwen3-1.7B,
-  15 bullets per LLM call. Accepts optional shared LLM handle. Defaults failed parses to
-  "S" to avoid all-Must-Have bias.
+- `judges/priority.py` — Batched MoSCoW priority classification (M/S/C) via the shared
+  Foundry backend, 15 bullets per LLM call. Accepts optional shared LLM handle. Defaults failed
+  parses to "S" to avoid all-Must-Have bias.
 - `input/` — Input assets: `video.mp4` (uploaded to AVI for indexing).
 - `output/` — Generated `extracted_requirements.json`, `project_config.json`,
   `BRS.docx`, `avi_index.json`, and `*_checkpoint.jsonl`.
@@ -104,12 +102,10 @@ rm output/extracted_requirements_checkpoint.jsonl
 # Regenerate docx only (after editing project_config.json)
 node generate_docx.js output/extracted_requirements.json output/BRS.docx output/project_config.json
 
-# Use HuggingFace backend (cross-platform) instead of MLX
-BACKEND=hf python main.py
-
-# Use hosted Azure Foundry / Azure OpenAI (gpt-4o) for all text-LLM stages
-# (judge, dedup resolution, MoSCoW priority, config gen). Requires
-# FOUNDRY_ENDPOINT / FOUNDRY_API_KEY / FOUNDRY_DEPLOYMENT in .env.
+# Run everything on hosted Azure Foundry / Azure OpenAI (gpt-4o) — all text-LLM
+# stages (judge, dedup resolution, MoSCoW priority, config gen) AND the keyframe
+# vision pass. Requires FOUNDRY_ENDPOINT / FOUNDRY_API_KEY / FOUNDRY_DEPLOYMENT
+# in `.env`. This is the only supported backend in this pipeline.
 BACKEND=foundry python main.py
 ```
 
@@ -129,7 +125,7 @@ BACKEND=foundry python main.py
 ```
 ┌──────────────┐    ┌───────────────┐    ┌──────────────────┐    ┌──────────────┐
 │  Store       │───▶│  AVI Index    │───▶│  AVI Proposer    │───▶│  Judge LLM   │
-│  Video/      │    │  (20s chunk   │    │  (OCR screen-    │    │ (Qwen3.5-9B) │
+│  Video/      │    │  (20s chunk   │    │  (OCR screen-    │    │ (Foundry via │
 │  Upload to   │    │  OCR +        │    │  text +          │    │  sequential  │
 │  Azure       │    │  transcript)  │    │  transcript)     │    └──────┬───────┘
 └──────────────┘    └───────────────┘    └──────────────────┘            │
@@ -142,7 +138,7 @@ BACKEND=foundry python main.py
                                                                  ┌───────▼───────┐
                                                                  │    MoSCoW     │
                                                                  │   Priority    │
-                                                                 │ (Qwen3-1.7B)  │
+                                                                 │ (shared       │
                                                                  └───────┬───────┘
                                                                          │
                                                                  ┌───────▼───────┐
@@ -160,26 +156,19 @@ BACKEND=foundry python main.py
 ```
 
 **Backend abstraction:** All stages go through the `InferenceBackend` interface
-(`backend.py`). The default `MLXBackend` runs on Apple Silicon via `mlx_lm`.
-Supports unified VLM-as-LLM for Qwen3.5-9B (loaded via `mlx_vlm` for text-only inference
-too). Set `BACKEND=hf` to use HuggingFace transformers + Pillow on any CUDA/MPS/CPU box.
-Set `BACKEND=foundry` to route all text-LLM stages (judge, dedup resolution, MoSCoW
-priority, config gen) to a hosted Azure Foundry / Azure OpenAI endpoint (e.g. gpt-4o)
-via `FoundryBackend`; the proposer remains AVI, so no local GPU models load and only
-Qwen3-1.7B (dedup/priority/config) loads locally on CPU.
-Model ID mapping (`_MLX_TO_HF` in `backend.py`) translates `lmstudio-community`/`mlx-community`
-IDs to canonical HuggingFace repo IDs for cross-backend compatibility. Flash-attention 2
-auto-detected at import time.
+(`backend.py`). The single `FoundryBackend` routes every LLM stage (judge, dedup resolution,
+MoSCoW priority, config gen) and the keyframe vision pass to a hosted Azure Foundry /
+Azure OpenAI deployment (e.g. gpt-4o). The proposer is AVI (cloud indexes OCR + transcript),
+so no local GPU models load at all. `JUDGE_MODEL`/`DEDUP_MODEL` are label-only strings used
+for token-usage reporting; the backend always generates with the `FOUNDRY_DEPLOYMENT` in
+the environment.
 
-**Memory flow:** The AVI proposer is a cloud client (no local GPU model). The judge
-(Qwen3.5-9B, ~9GB) loads once in Stage 4. Qwen3-1.7B (~1GB) loads once in Stage 5 and is
-**shared** across within-block dedup, priority classification, and config generation
-(same handle, single load/unload cycle). Dedup uses a pure-Python Jaccard prefilter (no
-embedding model), so nothing runs on the Metal GPU stream during Stage 5. Under
-`BACKEND=foundry` none of the local GPU models load — the judge/dedup/priority/config-gen
-LLM calls go to the hosted endpoint. Checkpoints are written incrementally
-(one line per chunk, JSONL) so the expensive proposer upload/index step can be skipped
-on re-run.
+**Memory flow:** The AVI proposer is a cloud client (no local GPU). The single `FoundryBackend`
+is a lightweight handle factory — `load_llm` returns the deployment name and no models load
+locally. All judge/dedup/priority/config-gen LLM calls and the keyframe vision pass go to the
+hosted endpoint. Dedup uses a pure-Python Jaccard prefilter (no embedding model). Checkpoints
+are written incrementally (one line per chunk, JSONL) so the expensive proposer upload/index
+step can be skipped on re-run.
 
 **Web UI:** FastAPI server (`uvicorn server.app:app`) serves the static SPA and exposes
 REST endpoints for pipeline orchestration. Progress is streamed via WebSocket as
@@ -202,10 +191,10 @@ Within-block dedup runs per 20s time block: bullets above
 duplicates (conservative — same-topic is not enough) and returns one canonical
 bullet per confirmed group. No cross-block pass exists.
 
-**Priority classification:** Batched MoSCoW (M/S/C) via Qwen3-1.7B, 15 bullets per LLM
-call. Defaults failed/bad-parse entries to "S" (not "M") to avoid all-Must-Have bias.
-The system prompt instructs the LLM to ignore the template word "must" and judge actual
-business criticality.
+**Priority classification:** Batched MoSCoW (M/S/C) via the shared Foundry backend,
+15 bullets per LLM call. Defaults failed/bad-parse entries to "S" (not "M") to avoid
+all-Must-Have bias. The system prompt instructs the LLM to ignore the template word
+"must" and judge actual business criticality.
 
 **Spell checking:** Post-processing pass via `flag_unknown_words()` wraps unrecognised
 words in `[[double brackets]]`. Uses pyspellchecker with domain terms + compound-word
@@ -222,9 +211,8 @@ No tests are implemented yet.
 - **Secrets:** No API keys or credentials in code. AVI tokens and Foundry keys come
   from `.env`.
 - **Dependency scanning:** `pip-audit` or `safety` recommended before deployment.
-- **Model weights:** Downloaded from Hugging Face Hub via `mlx-lm`
-  (`mlx-vlm` only when the unified VLM-as-LLM judge path is used). Verify model IDs in
-  `config.py` before use.
+- **Model weights:** No local model weights are used — every LLM and vision call
+  goes to the hosted Foundry deployment. Verify `FOUNDRY_DEPLOYMENT` in `.env`.
 - **License:** MIT. Node.js `docx` package is MIT-licensed.
 
 ## Agent Guardrails
@@ -233,8 +221,8 @@ No tests are implemented yet.
 - **DO NOT** commit model weights or `.venv/` to version control.
 - **DO NOT** change `AVI_UPLOAD_NAME` or paths without updating the corresponding
   AVI cache marker (`output/avi_upload.json` / `avi_index.json.marker`).
-- **DO NOT** parallelize judge evaluation — MLX GPU streams are thread-local and
-  will fail with `"There is no Stream(gpu, N) in current thread"`.
+- **DO NOT** parallelize judge evaluation — the panel is a single sequential judge, and
+  shared Foundry handles must not be raced across threads.
 - **DO NOT** call `generate_docx.js` without first verifying `project_config.json`
   exists — `PipelineRunner._generate_docx()` already enforces this.
 - **DO NOT** remove the `finally` block that unloads the shared judge handle in Stage 5/6
@@ -245,14 +233,12 @@ No tests are implemented yet.
 
 ## Extensibility Hooks
 
-- **Backend:** Select MLX (Apple Silicon), HF (CUDA/CPU), or Foundry (hosted
-  Azure OpenAI, text-only) via `BACKEND` env var.
-  Add new backends by implementing `InferenceBackend` ABC in `backend.py`.
-- **Models:** Swap judge or dedup models by editing `JUDGE_MODEL`, `DEDUP_MODEL` in
-  `config.py`. For HF backend, add model ID mapping in `_MLX_TO_HF` dict in `backend.py`.
-  Qwen3.5 uses the unified VLM-as-LLM path in MLXBackend; add new unified model IDs to
-  `_VLM_BACKED_TEXT_MODELS`. Models needing `/no_think` append must be added to
-  `_NO_THINK_MODELS` in `backend.py`.
+- **Backend:** Foundry-only: `BACKEND=foundry` (or unset) returns a `FoundryBackend`; any
+  other value is rejected. Add new backends by implementing `InferenceBackend` ABC in
+  `backend.py` and wiring the factory in `get_backend`.
+- **Models:** Swap the hosted deployment by setting `FOUNDRY_DEPLOYMENT` in the environment
+  (.env). `JUDGE_MODEL` / `DEDUP_MODEL` in `config.py` are label-only (token-usage
+  reporting) — the backend always generates with `FOUNDRY_DEPLOYMENT`.
 - **Chunking:** Adjust `CHUNK_SIZE_SEC` in `config.py`.
 - **Deduplication:** Tune `CANDIDATE_THRESHOLD` (recall prefilter) in
   `judges/dedup.py`.
@@ -276,13 +262,11 @@ No tests are implemented yet.
 ## Further Reading
 
 - `config.py` — all tunable parameters in one file.
-- `backend.py` — inference backend abstraction, three implementations, model ID mapping,
-  unified VLM-as-LLM support, `/no_think` model handling.
+- `backend.py` — inference backend abstraction, single FoundryBackend, text + vision
+  multimodal content support.
 - `utils.py` — shared text cleaning, spell checking, JSON extraction.
 - `server/pipeline_runner.py` — complete 7-stage pipeline implementation.
 - `server/app.py` — FastAPI REST + WebSocket API.
 - `static/app.js` — frontend SPA with WebSocket progress streaming.
-- [MLX documentation](https://ml-explore.github.io/mlx/)
-- [mlx-vlm](https://github.com/ml-explore/mlx-vlm)
 - [docx npm package](https://docx.js.org/)
 - [FastAPI](https://fastapi.tiangolo.com/)

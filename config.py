@@ -1,14 +1,15 @@
 """
-Configuration file for the VLM-PwC project.
-All paths, model names, and hyperparameters are defined here.
+Configuration file for the BRS extraction pipeline.
+All paths, deployment labels, and hyperparameters are defined here.
 
-Model IDs live ONLY in this file (the model registry below). Every other
-module — backend.py, models/, judges/, config_generator.py — derives its
-model references from here, so renaming a model is a single-line change.
+The pipeline is Azure + Foundry only. All LLM (and vision) inference goes to
+a hosted Azure Foundry / Azure OpenAI deployment identified by
+FOUNDRY_DEPLOYMENT; JUDGE_MODEL / DEDUP_MODEL below are label-only — callers
+pass them as a model name for token-usage reporting, but FoundryBackend ignores
+the value and always uses the deployment from the environment.
 """
 
 import os
-from dataclasses import dataclass
 
 VIDEO_PATH = "input/video.mp4"
 TRANSCRIPT_PATH = "input/transcript.json"
@@ -17,51 +18,16 @@ CHECKPOINT_FILE = "output/extracted_requirements_checkpoint.jsonl"
 CONFIG_FILE = "output/project_config.json"
 DOCX_FILE = "output/BRS.docx"
 
-# ── Model registry ─────────────
-
-
-@dataclass(frozen=True)
-class ModelSpec:
-    """Metadata for one model used by the pipeline.
-
-    Attributes:
-        mlx_id:     Model ID passed to the MLX backend (and referenced by
-                    MLXBackend's _NO_THINK/_VLM_BACKED classification).
-        hf_id:      Canonical HuggingFace repo ID used by the HF backend
-                    (the _MLX_TO_HF mapping).
-        no_think:   Whether the model needs a "/no_think" suffix to disable
-                    CoT thinking blocks.
-        vlm_backed: Whether the model is loaded via mlx_vlm even for
-                    text-only LLM calls (unified VLM-as-LLM routing).
-    """
-
-    mlx_id: str
-    hf_id: str
-    no_think: bool = False
-    vlm_backed: bool = False
-
-
-JUDGE = ModelSpec(
-    mlx_id="lmstudio-community/Qwen3.5-9B-MLX-4bit",
-    hf_id="Qwen/Qwen3.5-9B",
-    no_think=True,
-    vlm_backed=True,
-)
-# Shared small LLM. NOTE: despite the name, DEDUP_MODEL powers priority
-# classification AND config generation in addition to dedup resolution —
-# the pipeline loads it once and shares the handle across those stages.
-DEDUP = ModelSpec(
-    mlx_id="mlx-community/Qwen3-1.7B-4bit",
-    hf_id="Qwen/Qwen3-1.7B",
-    no_think=True,
-)
-
-ALL_MODELS = [JUDGE, DEDUP]
-
-# Backwards-compat aliases — keep consumer imports unchanged. Each maps to a
-# single registry entry so renaming a model is a one-line change above.
-JUDGE_MODEL = JUDGE.mlx_id
-DEDUP_MODEL = DEDUP.mlx_id
+# ── Deployment labels ──────────────────────────────────────────────────────
+# Label-only model names passed to load_llm/generate_llm and used for token-
+# usage reporting (usage.py). FoundryBackend ignores the value and always
+# generates with the deployment from FOUNDRY_DEPLOYMENT. They stay as distinct
+# constants so call sites signal which stage they are driving.
+JUDGE_MODEL = "foundry-judge"
+# NOTE: despite the name, DEDUP_MODEL powers priority classification AND config
+# generation in addition to dedup resolution — the pipeline loads it once and
+# shares the handle across those stages.
+DEDUP_MODEL = "foundry-dedup"
 
 # Chunking configuration
 CHUNK_SIZE_SEC = 20
@@ -98,59 +64,12 @@ SINGLE_PASS_CANDIDATE_THRESHOLD = 0.25
 # copyright/footer, version strings) before the judge sees the screen text.
 AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 
-# Optional "component-placement" pass: ask AVI to run its connected vision LLM
-# over the video's keyframes and return a UI-layout description (buttons, menus,
-# panels, logo/icon positions). AVI's Textual-Summary API is whole-video, so this
-# augments SINGLE-PASS mode only. Enabled by default, but it only ever fires when
-# AVI_SINGLE_PASS=1 (which is itself opt-in); it is a paid, async AVI job, cached
-# per source video so a re-run never re-pays. AVI runs the model itself on its
-# own connected OpenAI deployment (read via AZURE_VIDEO_INDEXER_DEPLOYMENT), so no
-# local GPU is needed and the Foundry/text-LLM backend is untouched. Disable with
-# AVI_KEYFRAME_SUMMARY=0.
-AVI_KEYFRAME_SUMMARY = os.getenv("AVI_KEYFRAME_SUMMARY", "1") == "1"
-# Max seconds to wait for AVI to finish a keyframe summarization job.
-AVI_KEYFRAME_SUMMARY_TIMEOUT_SEC = 600
-# Create-Video-Summary tuning: AVI requires these two params and rejects the
-# request with HTTP 400 ("Invalid summary length value") when they are absent.
-# length: short | medium | long   (matching the portal's Short/Medium/Long).
-# style:  neutral | casual | formal.
-AVI_KEYFRAME_SUMMARY_LENGTH = "medium"
-AVI_KEYFRAME_SUMMARY_STYLE = "neutral"
-# Cache file for the keyframe UI summary (input artifact, re-used across runs
-# exactly like the AVI index — never cleaned by the pipeline).
-AVI_KEYFRAME_SUMMARY_FILE = "avi_keyframe_summary.json"
-
-# Instruction appended to the AVI keyframe summary so its output reads like the
-# old frame-based UI proposer: component placement + requirement bullets.
-AVI_KEYFRAME_INSTRUCTIONS = (
-    "Act as a strict systems analyst watching a software demo. For each screen, "
-    "describe the UI layout: the placement of buttons, menus, panels and dialogs "
-    "(top/bottom, left/center/right and relative ordering). Include the position "
-    "of non-text graphical components such as logos and icons. Then list the "
-    "observed functional requirements as distinct bullets starting with "
-    "'The system shall '."
-)
-
-# Section template for the optional VLM keyframe screen-analysis block. Prepended
-# to OCR + transcript in the single-pass context when a keyframe summary exists,
-# so the judge sees component placement (which plain OCR text cannot capture)
-# alongside the exact OCR labels.
-AVI_KEYFRAME_SECTION_TEMPLATE = (
-    "VLM SCREEN ANALYSIS (component placement from video keyframes):\n"
-    "{ui_description}\n\n"
-)
-
-# ── UI-description source (Route A vs Route B) ─────────────────────────────
-# AVI_KEYFRAME_SUMMARY enables the component-placement pass; AVI_UI_SOURCE picks
-# WHO runs the vision:
-#   "avi"     → Route A: AVI's Create-Textual-Summary (needs an AVI-linked
-#               deployment name AVI accepts, via AZURE_VIDEO_INDEXER_DEPLOYMENT).
-#   "foundry" → Route B (default): fetch AVI keyframe JPEGs ourselves and send
-#               them to the user's Foundry gpt-4o deployment (no AVI deployment
-#               requirement). This is the recommended path.
-AVI_UI_SOURCE = os.getenv("AVI_UI_SOURCE", "foundry")
-# Cache file for the Route B keyframe UI description (kept separate from the
-# Route A summary file so switching sources never serves stale text).
+# Optional "component-placement" pass (Route B): fetch the AVI video's keyframe
+# JPEGs and send them to the Foundry vision deployment to build a UI-layout
+# description (buttons, menus, panels, logo/icon positions). AVI keyframes are
+# whole-video, so this augments SINGLE-PASS mode only. It only fires when
+# AVI_SINGLE_PASS=1; the frames and the resulting description are cached per
+# source video so a re-run never re-downloads frames or re-pays for vision.
 AVI_UI_DESCRIPTION_FILE = "avi_ui_description.json"
 # Cap on how many keyframes a single vision request may carry (Azure OpenAI
 # allows up to 10 images per chat-completions request). Sampled evenly.
@@ -159,7 +78,7 @@ AVI_UI_MAX_FRAMES = 10
 AVI_UI_FRAME_DETAIL = os.getenv("AVI_UI_FRAME_DETAIL", "low")
 # Output budget for the UI-description vision call.
 AVI_UI_DESCRIPTION_MAX_TOKENS = 2000
-# System prompt for the Route B vision pass. Focused on component PLACEMENT only
+# System prompt for the vision pass. Focused on component PLACEMENT only
 # (the judge below turns it, plus OCR + transcript, into requirement bullets).
 AVI_UI_DESCRIPTION_SYSTEM = (
     "You are a UI analyst reviewing keyframes from a software product demo. "
@@ -169,6 +88,14 @@ AVI_UI_DESCRIPTION_SYSTEM = (
     "right and relative ordering), and the position of non-text graphical "
     "components such as logos and icons. Only describe what is actually visible "
     "in the frames. Be factual and concise; no preamble."
+)
+# Section template for the VLM keyframe screen-analysis block. Prepended
+# to OCR + transcript in the single-pass context when a UI description exists,
+# so the judge sees component placement (which plain OCR text cannot capture)
+# alongside the exact OCR labels.
+AVI_UI_SECTION_TEMPLATE = (
+    "VLM SCREEN ANALYSIS (component placement from video keyframes):\n"
+    "{ui_description}\n\n"
 )
 
 # Generation configuration
@@ -216,10 +143,10 @@ AVI_UPLOAD_TIMEOUT_SEC = 900  # generous read timeout for large video uploads
 #                                       access). App-level DNS override; SNI/Host
 #                                       keep the FQDN.
 
-# ── Azure Foundry / Azure OpenAI (judge backend) ─────────────
-# Optional hosted text-LLM backend for the judge, dedup resolution, MoSCoW
-# priority, and config generation. Set BACKEND=foundry to use it instead of
-# the local MLX/HF models. Env vars consumed by backend.FoundryBackend:
+# ── Azure Foundry / Azure OpenAI (inference backend) ─────────────
+# All LLM stages (judge, dedup resolution, MoSCoW priority, config gen) and the
+# keyframe vision pass run on a hosted Azure Foundry / Azure OpenAI deployment
+# via backend.FoundryBackend (BACKEND=foundry). Env vars consumed there:
 #   FOUNDRY_ENDPOINT      base URL, e.g. https://<resource>.openai.azure.com/openai/v1/
 #   FOUNDRY_API_KEY       API key for the endpoint
 #   FOUNDRY_DEPLOYMENT    deployment name sent as the "model" field (e.g. gpt-4o)
@@ -232,9 +159,8 @@ FOUNDRY_RETRY_BACKOFF = 2.0
 
 # ── Prompts ─────────────────────────────────────────────────────────────
 # The AVI judge reads RAW OCR (on-screen UI text) + transcript for a chunk
-# and EMITS "The system shall ..." bullets — the job the local frame-based
-# VLM proposer used to do. This replaces the local VLM proposer; the judge
-# LLM now converts screen text into testable capabilities.
+# and EMITS "The system shall ..." bullets. The judge LLM now converts screen
+# text into testable capabilities.
 AVI_JUDGE_SYSTEM = (
     "You are a strict systems analyst watching a software demo. Below you will be "
     "given OCR (on-screen text captured from the video frames) and the spoken "

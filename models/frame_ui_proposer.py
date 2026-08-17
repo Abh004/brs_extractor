@@ -4,16 +4,16 @@ models/frame_ui_proposer.py
 Route B: describe on-screen UI (component placement) from AVI keyframes using the
 user's own vision-capable backend (e.g. Foundry gpt-4o).
 
-This REPLACES AVI's Create-Textual-Summary as the source of the "ui_description"
-block. Instead of making AVI run its connected model (which requires a deployment
-name AVI accepts), we:
+This is the source of the "ui_description" block for the single-pass context.
+Instead of making AVI run its connected model (which requires a deployment name
+AVI accepts), we:
   1. pull keyframe JPEGs from the AVI index (avi.fetch_sample_keyframes),
   2. base64 them into data URLs,
   3. send them + a placement prompt to backend.generate_llm(..., images=...),
   4. cache the resulting text per source video.
 
-Only FoundryBackend supports image input; MLX/HF raise a clear error if given
-images. The result is cached to AVI_UI_DESCRIPTION_FILE so re-runs never re-pay.
+Only FoundryBackend supports image input (the sole backend in this pipeline).
+The result is cached to AVI_UI_DESCRIPTION_FILE so re-runs never re-pay.
 """
 
 from __future__ import annotations

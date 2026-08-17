@@ -26,15 +26,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from backend import check_hf_reachable, get_backend, print_hf_unreachable_warning
+from backend import get_backend
 from config import (
     AVI_INDEX_FILE,
     AVI_JUDGE_SYSTEM,
-    AVI_KEYFRAME_SUMMARY,
     AVI_SINGLE_PASS,
     AVI_SINGLE_PASS_SYSTEM,
     AVI_UI_MAX_FRAMES,
-    AVI_UI_SOURCE,
     CHECKPOINT_FILE,
     CHUNK_SIZE_SEC,
     CONFIG_FILE,
@@ -63,12 +61,6 @@ from judges.priority import classify_priorities
 from models import AVIProposer
 from models.frame_ui_proposer import get_keyframe_ui_description
 from utils import flag_unknown_words
-
-try:
-    import mlx.core as _mx
-    _HAS_MLX = True
-except ImportError:
-    _HAS_MLX = False
 
 
 @dataclass
@@ -207,11 +199,6 @@ class PipelineRunner:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._run_sync, cb)
 
-    @staticmethod
-    def _clear_gpu_cache():
-        if _HAS_MLX:
-            _mx.clear_cache()
-
     def _run_sync(self, cb: Callback | None = None):
         try:
             self._pipeline(cb)
@@ -268,25 +255,8 @@ class PipelineRunner:
 
         if self._single_pass:
             full_chunk = build_avi_single_pass_chunk(index)
-            if AVI_KEYFRAME_SUMMARY and AVI_UI_SOURCE == "avi":
-                self._emit(cb, StageUpdate(
-                    1, "Azure Video Indexer", "running",
-                    "Creating keyframe UI summary (component placement)...",
-                    0.92))
-                try:
-                    full_chunk["ui_description"] = avi_client.get_keyframe_ui_summary(
-                        video_path=self._video_path,
-                        index=index,
-                        output_dir=self._output_dir,
-                    )
-                except Exception as e:
-                    print(
-                        f"  [AVI] keyframe UI summary failed ({e}); "
-                        f"continuing with OCR + transcript only."
-                    )
-                    full_chunk["ui_description"] = None
-            # Route B (foundry) attaches its UI description in Stage 2 once the
-            # backend is available; the estimate here covers OCR + transcript only.
+            # The UI-description vision pass (foundry) attaches below in Stage 2
+            # once the backend is available; this estimate covers OCR + transcript only.
             context = AVIProposer.render(full_chunk)
             estimated = _estimate_tokens(context)
             if estimated > SINGLE_PASS_INPUT_TOKEN_CAP:
@@ -314,14 +284,6 @@ class PipelineRunner:
         stage2_start = time.time()
         self._check_cancelled()
 
-        # Check HF reachability for user awareness
-        if not check_hf_reachable():
-            print_hf_unreachable_warning()
-
-        # Clear any stale GPU state from previous runs (safe no-op if mlx not available)
-        self._clear_gpu_cache()
-        self._check_cancelled()
-
         backend = get_backend(self._backend_name)
         self._check_cancelled()
 
@@ -333,12 +295,7 @@ class PipelineRunner:
 
         # Route B: describe on-screen UI from keyframes via the Foundry vision
         # backend. Runs here (backend available) and only when single-pass survived.
-        if (
-            AVI_KEYFRAME_SUMMARY
-            and AVI_UI_SOURCE == "foundry"
-            and self._single_pass
-            and self._full_chunk is not None
-        ):
+        if self._single_pass and self._full_chunk is not None:
             self._emit(cb, StageUpdate(
                 2, "Model Initialization", "running",
                 "Describing UI components from keyframes (Foundry vision)...",
