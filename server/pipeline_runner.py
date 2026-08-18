@@ -21,7 +21,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -757,10 +756,12 @@ class PipelineRunner:
     def _generate_docx(self) -> None:
         if not os.path.exists(self._config_file):
             return
-        result = subprocess.run(
-            ["node", "generate_docx.js", self._output_file,
-             self._docx_file, self._config_file],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"  WARNING: docx generation failed:\n{result.stderr.strip()}")
+        try:
+            from generate_docx import generate_docx
+        except ImportError as exc:
+            print(f"  WARNING: python-docx not available; skipping docx:\n{exc}")
+            return
+        try:
+            generate_docx(self._output_file, self._docx_file, self._config_file)
+        except Exception as exc:
+            print(f"  WARNING: docx generation failed:\n{exc}")

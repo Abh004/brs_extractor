@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     # Platform-agnostic — used by the Azure + Foundry inference path
     "numpy>=1.26.0",
+    "python-docx>=1.1.0",
     "python-dotenv>=1.0.0",
     "pyspellchecker>=0.8.3",
     "requests>=2.31",

@@ -29,9 +29,9 @@ Includes a FastAPI web UI with WebSocket progress streaming.
 - `config_generator.py` — Judge-LLM inference pass (via the shared backend handle) that reads
   the final bullet list and writes `output/project_config.json` for docx generation. Accepts
   optional shared LLM handle to avoid redundant model loads.
-- `generate_docx.js` — Node.js script that reads `extracted_requirements.json` and
-  `project_config.json` to produce `BRS.docx`. Requires Node.js >= 18 and `docx` npm package.
-  All content driven by config JSON — no hardcoded categories or product names.
+- `generate_docx.py` — Python script (python-docx) that reads `extracted_requirements.json` and
+  `project_config.json` to produce `BRS.docx`. All content driven by config JSON — no
+  hardcoded categories or product names.
 - `pyproject.toml` — Package metadata and pinned Python dependencies. Optional `[web]`
   extras for FastAPI/uvicorn/websockets.
 - `server/` — FastAPI web application with three modules:
@@ -84,9 +84,6 @@ pip install -e .
 # Install web UI dependencies (optional, for FastAPI server)
 pip install -e '.[web]'
 
-# Install Node.js dependency (one-time)
-npm install -g docx
-
 # Run full pipeline (CLI)
 python main.py
 
@@ -100,7 +97,7 @@ uvicorn server.app:app --reload
 rm output/extracted_requirements_checkpoint.jsonl
 
 # Regenerate docx only (after editing project_config.json)
-node generate_docx.js output/extracted_requirements.json output/BRS.docx output/project_config.json
+python generate_docx.py output/extracted_requirements.json output/BRS.docx output/project_config.json
 
 # Run everything on hosted Azure Foundry / Azure OpenAI (gpt-4o) — all text-LLM
 # stages (judge, dedup resolution, MoSCoW priority, config gen) AND the keyframe
@@ -148,10 +145,10 @@ BACKEND=foundry python main.py
                                                                  └───────┬───────┘
                                                                          │
                                                                  ┌───────▼───────┐
-                                                                 │  BRS Docx     │
-                                                                 │  generate_    │
-                                                                 │  docx.js      │
-                                                                 │  (Stage 7)    │
+                                                                  │  BRS Docx     │
+                                                                  │  generate_    │
+                                                                  │  docx.py      │
+                                                                  │  (Stage 7)    │
                                                                  └───────────────┘
 ```
 
@@ -213,7 +210,7 @@ No tests are implemented yet.
 - **Dependency scanning:** `pip-audit` or `safety` recommended before deployment.
 - **Model weights:** No local model weights are used — every LLM and vision call
   goes to the hosted Foundry deployment. Verify `FOUNDRY_DEPLOYMENT` in `.env`.
-- **License:** MIT. Node.js `docx` package is MIT-licensed.
+- **License:** MIT.
 
 ## Agent Guardrails
 
@@ -223,7 +220,7 @@ No tests are implemented yet.
   AVI cache marker (`output/avi_upload.json` / `avi_index.json.marker`).
 - **DO NOT** parallelize judge evaluation — the panel is a single sequential judge, and
   shared Foundry handles must not be raced across threads.
-- **DO NOT** call `generate_docx.js` without first verifying `project_config.json`
+- **DO NOT** call `generate_docx.py` without first verifying `project_config.json`
   exists — `PipelineRunner._generate_docx()` already enforces this.
 - **DO NOT** remove the `finally` block that unloads the shared judge handle in Stage 5/6
   — if the handle leaks, subsequent runs will fail with "model already loaded".
@@ -255,7 +252,7 @@ No tests are implemented yet.
 - **Keyframe vision coverage:** Every AVI keyframe is analyzed. Tune `AVI_UI_BATCH_SIZE`
   (images per vision request, ≤ Azure's ~10 ceiling) and `AVI_UI_DESCRIPTION_MAX_TOKENS` /
   `AVI_UI_MAX_DESC_TOKENS` (per-batch and total description budgets) in `config.py`.
-- **Docx layout:** Edit `generate_docx.js` — all content is driven by
+- **Docx layout:** Edit `generate_docx.py` — all content is driven by
   `project_config.json`, no hardcoded product names or categories.
 - **Retry/timeout:** Adjust `_JUDGE_MAX_RETRIES`, `_JUDGE_TIMEOUT_SEC` constants at the
   top of `server/pipeline_runner.py`.
@@ -271,5 +268,5 @@ No tests are implemented yet.
 - `server/pipeline_runner.py` — complete 7-stage pipeline implementation.
 - `server/app.py` — FastAPI REST + WebSocket API.
 - `static/app.js` — frontend SPA with WebSocket progress streaming.
-- [docx npm package](https://docx.js.org/)
+- [python-docx](https://python-docx.readthedocs.io/)
 - [FastAPI](https://fastapi.tiangolo.com/)
