@@ -32,20 +32,21 @@ DEDUP_MODEL = "foundry-dedup"
 # Chunking configuration
 CHUNK_SIZE_SEC = 20
 
-# Single-pass AVI mode (Foundry friendly). When enabled, the entire video's
-# OCR + transcript is fed to the judge as ONE block instead of per-20s chunks.
-# This drops per-block time attribution but reduces judge round-trips and the
-# local 20s-bucket output shape. The proposer stage still needs chunk
-# boundaries IF the assembled full context is too large — see the fallback in
-# server/pipeline_runner.py. Toggle via AVI_SINGLE_PASS=1.
-AVI_SINGLE_PASS = os.getenv("AVI_SINGLE_PASS", "0") == "1"
+# Single-pass AVI mode — the DEFAULT. The entire video's OCR + transcript is
+# fed to the judge as ONE block instead of per-20s chunks. This drops per-block
+# time attribution but reduces judge round-trips and the local 20s-bucket
+# output shape. If the assembled full context is estimated to exceed
+# SINGLE_PASS_INPUT_TOKEN_CAP, single-pass falls back to the 20s chunks (see
+# server/pipeline_runner.py). Disable (force chunked mode) via
+# AVI_SINGLE_PASS=0.
+AVI_SINGLE_PASS = os.getenv("AVI_SINGLE_PASS", "1") != "0"
 # Per-judge-call output budget for a single-pass prompt. The default
 # JUDGE_MAX_TOKENS (150) is far too small to emit ALL bullets for a long video.
 SINGLE_PASS_JUDGE_MAX_TOKENS = 8000
-# Conservative input-budget guard: if the assembled full context is estimated
-# to exceed this many tokens, single-pass falls back to coarse chunking instead
-# of overflowing the hosted model's context window.
-SINGLE_PASS_INPUT_TOKEN_CAP = 100000
+# Input-budget guard: if the assembled full context is estimated to exceed this
+# many tokens, single-pass falls back to chunking instead of overflowing the
+# hosted model's context window.
+SINGLE_PASS_INPUT_TOKEN_CAP = 1_000_000
 # Downstream dedup/priority/config are bounded per block. With one whole-video
 # block the bullet list can be large; cap it so the O(n^2) Jaccard prefilter and
 # per-cluster LLM calls stay reasonable.
@@ -67,9 +68,10 @@ AVI_OCR_NOISE_FILTER = os.getenv("AVI_OCR_NOISE_FILTER", "1") == "1"
 # Optional "component-placement" pass (Route B): fetch the AVI video's keyframe
 # JPEGs and send them to the Foundry vision deployment to build a UI-layout
 # description (buttons, menus, panels, logo/icon positions). AVI keyframes are
-# whole-video, so this augments SINGLE-PASS mode only. It only fires when
-# AVI_SINGLE_PASS=1; the frames and the resulting description are cached per
-# source video so a re-run never re-downloads frames or re-pays for vision.
+# whole-video, so this augments SINGLE-PASS mode only. It fires by default when
+# single-pass survives the token-cap check (disable with AVI_SINGLE_PASS=0); the
+# frames and the resulting description are cached per source video so a re-run
+# never re-downloads frames or re-pays for vision.
 AVI_UI_DESCRIPTION_FILE = "avi_ui_description.json"
 # EVERY keyframe in the AVI index is analyzed for maximum coverage. Azure OpenAI
 # caps the number of images per chat-completions request, so keyframes are chunked
