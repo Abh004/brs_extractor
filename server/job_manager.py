@@ -39,7 +39,6 @@ class Job:
     progress: float = 0.0
     message: str = ""
     log: str = ""
-    details: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
     updates: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=500))

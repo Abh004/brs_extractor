@@ -5,7 +5,6 @@ from config import (
     AVI_JUDGE_SYSTEM,
     JUDGE_MAX_TOKENS,
     JUDGE_MODEL,
-    JUDGE_SYSTEM,
 )
 from judges.dedup import (
     extract_bullets,
@@ -31,9 +30,6 @@ class JudgesPanel:
         backend: InferenceBackend | None = None,
         system_prompt: str = AVI_JUDGE_SYSTEM,
     ) -> None:
-        # Default prompt now targets AVI proposer output (raw OCR + transcript).
-        # Pass system_prompt=JUDGE_SYSTEM explicitly to use the legacy
-        # refine-only prompt. JUDGE_SYSTEM is retained for that fallback path.
         self._backend = backend or get_backend()
         self._handle = None
         self._system_prompt = system_prompt

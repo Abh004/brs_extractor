@@ -2,18 +2,6 @@
 let currentJobId = null;
 let ws = null;
 
-/* ── Tab switching ── */
-document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
-      document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
-    });
-  });
-});
-
 /* ── Pipeline Control ── */
 async function startPipeline() {
   const runBtn = document.getElementById('run-btn');
@@ -21,19 +9,15 @@ async function startPipeline() {
   runBtn.innerHTML = '<span class="btn-icon">&#9699;</span> Starting...';
 
   const formData = new FormData();
-  const activeTab = document.querySelector('.tab-btn.active').dataset.tab;
+  const videoFile = document.getElementById('video-file').files[0];
 
-  if (activeTab === 'upload') {
-    const videoFile = document.getElementById('video-file').files[0];
-
-    if (videoFile) formData.append('video_file', videoFile);
-
-    if (!videoFile) {
-      showError('Upload a video file.');
-      resetButton();
-      return;
-    }
+  if (!videoFile) {
+    showError('Upload a video file.');
+    resetButton();
+    return;
   }
+
+  formData.append('video_file', videoFile);
 
   try {
     const resp = await fetch('/api/run', { method: 'POST', body: formData });

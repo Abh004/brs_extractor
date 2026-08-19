@@ -23,6 +23,7 @@ import requests
 from urllib3.util.retry import Retry
 
 from config import (
+    AVI_UI_FRAME_DETAIL,
     FOUNDRY_CONNECT_TIMEOUT,
     FOUNDRY_MAX_RETRIES,
     FOUNDRY_READ_TIMEOUT,
@@ -132,7 +133,7 @@ class FoundryBackend(InferenceBackend):
     """
 
     def __init__(self) -> None:
-        self.usage = TokenTracker()
+        super().__init__()
         self._endpoint = os.getenv("FOUNDRY_ENDPOINT", "").rstrip("/")
         self._api_key = os.getenv("FOUNDRY_API_KEY", "").strip()
         self._deployment = os.getenv("FOUNDRY_DEPLOYMENT", "").strip()
@@ -205,7 +206,7 @@ class FoundryBackend(InferenceBackend):
         images: list[str] | None = None,
     ) -> str:
         if images:
-            detail = os.getenv("AVI_UI_FRAME_DETAIL", "low")
+            detail = AVI_UI_FRAME_DETAIL
             user_content = [{"type": "text", "text": user_prompt}]
             for url in images:
                 user_content.append(

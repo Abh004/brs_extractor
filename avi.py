@@ -653,11 +653,6 @@ def get_transcript(index: dict) -> list[dict]:
     return _segs(_insights(index).get("transcript") or [])
 
 
-def get_ocr(index: dict) -> list[dict]:
-    """Return OCR screen-text segments [{start, end, text}]."""
-    return _segs(_insights(index).get("ocr") or [])
-
-
 def get_ocr_spatial(index: dict) -> list[dict]:
     """Return OCR segments with normalized screen position.
 
@@ -686,21 +681,6 @@ def get_ocr_spatial(index: dict) -> list[dict]:
             "height": it.get("height"),
         })
     return out
-
-
-def save_index(index: dict, output_dir: str = "output", index_file: str = AVI_INDEX_FILE) -> str:
-    """Persist the AVI index JSON to disk. Returns the path."""
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, index_file)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False)
-    return path
-
-
-def load_index(index_path: str) -> dict:
-    """Load a previously saved AVI index from disk."""
-    with open(index_path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 # ── Keyframe extraction (Route B: fetch frame images for Foundry vision) ────

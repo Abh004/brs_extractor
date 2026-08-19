@@ -19,13 +19,9 @@ from config import AVI_RAW_TEMPLATE, AVI_UI_SECTION_TEMPLATE
 class AVIProposer:
     """Assemble raw OCR + transcript context for one chunk (no GPU inference)."""
 
-    def __init__(self, index: dict | None = None) -> None:
-        self._index = index
-
     @staticmethod
     def render(chunk: dict) -> str:
-        """
-        Compose the single raw context string for a chunk.
+        """Compose the single raw context string for a chunk.
 
         Prepend the optional VLM keyframe screen-analysis block (component
         placement) when present, then OCR + transcript. Kept as a static helper
@@ -51,19 +47,3 @@ class AVIProposer:
             block = AVI_UI_SECTION_TEMPLATE.format(ui_description=ui).strip()
             body = f"{block}\n\n{body}"
         return body
-
-    def generate(self, chunk: dict) -> str:
-        """
-        Build the raw context string for a chunk.
-
-        Args:
-            chunk: A per-bucket chunk dict {text_lines, ocr_lines} from
-                   data_prep.avi.load_avi_chunks.
-
-        Returns:
-            Formatted OCR + transcript text (the judge's input).
-        """
-        return self.render(chunk)
-
-    def unload(self) -> None:
-        """No-op — the AVI proposer holds no local model."""

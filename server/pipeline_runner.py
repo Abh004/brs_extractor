@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from backend import get_backend
@@ -71,7 +71,6 @@ class StageUpdate:
     progress: float  # 0.0–1.0
     elapsed: float = 0.0
     log: str = ""
-    details: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         """Dict form consumed by the WebSocket / job status endpoints."""
@@ -289,7 +288,7 @@ class PipelineRunner:
         self._emit(cb, StageUpdate(2, "Model Initialization", "running",
                                    "Setting up AVI proposer...", 0.3))
         self._check_cancelled()
-        proposer = AVIProposer(index=index)
+        proposer = AVIProposer()
         self._check_cancelled()
 
         # Route B: describe on-screen UI from keyframes via the Foundry vision
@@ -368,7 +367,7 @@ class PipelineRunner:
                 label = "Single-pass whole-video proposal"
                 t = time.time()
                 try:
-                    response = proposer.generate(self._full_chunk)
+                    response = AVIProposer.render(self._full_chunk)
                     elapsed = time.time() - t
                 except Exception as e:
                     elapsed = time.time() - t
@@ -417,7 +416,7 @@ class PipelineRunner:
 
                     t = time.time()
                     try:
-                        response = proposer.generate(chunk_data)
+                        response = AVIProposer.render(chunk_data)
                         elapsed = time.time() - t
                     except Exception as e:
                         elapsed = time.time() - t
