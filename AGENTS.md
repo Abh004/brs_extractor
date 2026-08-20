@@ -239,7 +239,7 @@ No tests are implemented yet.
 - **Chunking:** Adjust `CHUNK_SIZE_SEC` in `config.py`.
 - **Deduplication:** Tune `CANDIDATE_THRESHOLD` (recall prefilter) in
   `judges/dedup.py`.
-- **Prompts:** Edit `AVI_JUDGE_SYSTEM`, `AVI_RAW_TEMPLATE`, `JUDGE_SYSTEM`, etc. in `config.py`.
+- **Prompts:** Edit `AVI_JUDGE_SYSTEM`, `AVI_RAW_TEMPLATE`, etc. in `config.py`.
 - **Judge count:** The panel now uses a single judge. To add multiple judges, extend
   `JudgesPanel.load_all()` and `evaluate()` in `judges/panel.py` and re-introduce a
   merger step (Jaccard-prefiltered LLM dedup handles N inputs).
