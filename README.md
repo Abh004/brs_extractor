@@ -24,8 +24,8 @@ GPU models are used.
 ```bash
 # 1. Create and activate a virtual environment
 python3.12 -m venv .venv
-source .venv/bin/activate
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate   #Linux
+.venv\Scripts\Activate.ps1  #Windows Powershell
 
 # 2. Install the package (platform-agnostic core)
 pip install -e .
