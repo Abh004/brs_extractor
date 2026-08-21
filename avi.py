@@ -24,6 +24,7 @@ TLS verification (GlobalProtect / corporate TLS interception) for these calls.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -361,15 +362,6 @@ def _write_upload_marker(output_dir: str, source: str, video_id: str, name: str)
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def _videos_by_name(base: str, name: str) -> list[dict]:
-    """List account videos and return those whose name matches exactly."""
-    data = _request("GET", f"{base}/Videos", _authed())
-    items = data if isinstance(data, list) else (data or {}).get("results") or []
-    if not isinstance(items, list):
-        return []
-    return [v for v in items if isinstance(v, dict) and v.get("name") == name]
-
-
 def _fetch_index(base: str, video_id: str, language: str) -> dict:
     """Return the index dict for an already-uploaded video."""
     url = f"{base}/Videos/{video_id}/Index?language={urllib.parse.quote(language)}"
@@ -396,8 +388,7 @@ def _upload_video(
 
     urllib3 won't retry a connection that fails while the request body is being
     written (it can't know how much the server received), so we retry the whole
-    upload ourselves. On a "video already exists" rejection, we reuse the
-    existing videoId instead of failing. Returns the videoId.
+    upload ourselves. Returns the videoId.
     """
     name_enc = urllib.parse.quote(name)
     upload_url = (
@@ -444,18 +435,6 @@ def _upload_video(
     if resp.status_code >= 400:
         display_url = _redact_url(upload_url)
         _diagnose("POST", upload_url, resp)
-        text = (resp.text or "").lower()
-        if resp.status_code in (400, 409) and any(
-            token in text for token in ("exist", "conflict", "duplicate")
-        ):
-            existing = _videos_by_name(base, name)
-            if existing and existing[0].get("id"):
-                vid = existing[0]["id"]
-                print(
-                    f"  [AVI] Upload rejected ({resp.status_code}); video "
-                    f"'{name}' already exists — reusing id {vid}."
-                )
-                return vid
         raise RuntimeError(
             f"AVI HTTP {resp.status_code} POST {display_url} -> {resp.text[:500]}"
         )
@@ -508,7 +487,8 @@ def upload_and_index(
 
     Avoids redundant uploads in this order:
       1. Reuse a cached index for the same source video.
-      2. Reuse an EXISTING, fully-processed account video with the same name.
+      2. Use a unique name per upload (source-hash suffix) to avoid
+         collisions with previously uploaded videos.
       3. Resume a videoId this tool uploaded earlier (marker file) that is
          still processing.
       4. Upload a fresh copy (retried with backoff for mid-stream aborts) and
@@ -534,23 +514,11 @@ def upload_and_index(
         else:
             print("  [AVI] Source video changed; re-indexing (discarding stale cache).")
 
-    # 2. Reuse an existing, fully-processed account video with the same name.
-    existing = _videos_by_name(base, name)
-    if existing:
-        match = existing[0]
-        state_code = match.get("state")
-        if state_code == "Processed":
-            print(
-                f"  [AVI] Found existing processed video '{name}' "
-                f"({match.get('id')}); reusing it."
-            )
-            state = _fetch_index(base, match["id"], language)
-            _save_index(cache_path, marker_path, state, video_path)
-            return state
-        print(
-            f"  [AVI] Found existing video '{name}' but it is {state_code}; "
-            f"only Processed videos are reused — continuing."
-        )
+    # 2. Append a short hash of the source identity to the name so each video
+    #    gets a unique AVI entry — avoids collisions with previously uploaded
+    #    videos that share the same AVI_UPLOAD_NAME.
+    source_hash = hashlib.md5(source.encode()).hexdigest()[:8]
+    unique_name = f"{name}-{source_hash}"
 
     # 3. Resume a videoId this tool uploaded earlier (still processing), or
     #    upload a fresh copy.
@@ -578,7 +546,7 @@ def upload_and_index(
             )
             video_id = vid
     if video_id is None:
-        video_id = _upload_video(base, video_path, name, language, output_dir, source)
+        video_id = _upload_video(base, video_path, unique_name, language, output_dir, source)
 
     state = _wait_for_index(base, video_id, language)
     _save_index(cache_path, marker_path, state, video_path)

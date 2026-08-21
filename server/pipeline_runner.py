@@ -538,6 +538,14 @@ class PipelineRunner:
                                     f"Pipeline finished in {total:.1f}s",
                                     1.0, elapsed=total))
 
+        # Clean up the uploaded video — it's already indexed in AVI, no
+        # longer needed on disk.
+        try:
+            if os.path.exists(self._video_path):
+                os.remove(self._video_path)
+        except OSError:
+            pass
+
     def _extract_bullets(
         self, refined: list,
     ) -> tuple[list[list[str]], list[str]]:
